@@ -78,6 +78,8 @@ function express() {
 const passthrough = () => (_req, _res, next) => next();
 express.json = passthrough;
 express.urlencoded = passthrough;
+// The bridge routes read raw bodies; the browser demo has no records system connected, so they are inert here.
+express.raw = passthrough;
 express.static = passthrough;
 express.Router = () => new Router();
 
