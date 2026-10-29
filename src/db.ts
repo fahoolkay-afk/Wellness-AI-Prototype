@@ -226,8 +226,20 @@ export class Db {
     return { ...c, notes: this.vault.open(c.clinic_id, `contact:${c.id}:notes`, c.notes) };
   }
 
+  // Task text often carries what the patient said ("chest pain after surgery"), so it's encrypted and bound
+  // to the patient it's about.
+  private taskAad(clinicId: number, contactId: number | null): string {
+    return `task:${clinicId}:${contactId ?? "none"}`;
+  }
+
   private decTask<T extends Task>(t: T): T {
-    return { ...t, details: this.vault.open(t.clinic_id, `task:${t.clinic_id}`, t.details) };
+    const aad = this.taskAad(t.clinic_id, t.contact_id);
+    return { ...t, title: this.vault.open(t.clinic_id, `${aad}:title`, t.title) ?? "", details: this.vault.open(t.clinic_id, aad, t.details) };
+  }
+
+  private decConversation<T extends Conversation | undefined>(c: T): T {
+    if (!c) return c;
+    return { ...c, attention_reason: this.vault.open(c.clinic_id, `conv:${c.id}:reason`, c.attention_reason) };
   }
 
   private decCall<T extends Call>(c: T): T {
@@ -370,8 +382,12 @@ export class Db {
     let messages = 0;
     if (conv) messages = Number(this.sql.prepare("DELETE FROM messages WHERE conversation_id = ?").run(conv.id).changes);
     const calls = Number(this.sql.prepare("UPDATE calls SET summary = NULL, transcript = NULL, purged_at = ? WHERE contact_id = ?").run(new Date().toISOString(), contactId).changes);
-    this.sql.prepare("UPDATE tasks SET details = NULL WHERE contact_id = ?").run(contactId);
+    const clinicId = this.one<{ clinic_id: number }>("SELECT clinic_id FROM contacts WHERE id = ?", contactId)?.clinic_id ?? 0;
+    this.sql.prepare("UPDATE tasks SET title = ?, details = NULL WHERE contact_id = ?")
+      .run(this.vault.seal(clinicId, `${this.taskAad(clinicId, contactId)}:title`, "Task text erased at the patient's request"), contactId);
     this.sql.prepare("UPDATE contacts SET notes = NULL WHERE id = ?").run(contactId);
+    this.sql.prepare("UPDATE conversations SET attention_reason = NULL WHERE contact_id = ?").run(contactId);
+    this.sql.prepare("DELETE FROM contact_proposals WHERE contact_id = ?").run(contactId);
     return { messages, calls };
   }
 
@@ -379,7 +395,7 @@ export class Db {
   purgeOlderThan(clinicId: number, messagesBefore: string, callsBefore: string): { messages: number; calls: number } {
     const now = new Date().toISOString();
     const messages = Number(this.sql.prepare(
-      `UPDATE messages SET body = '', subject = NULL, purged_at = ? WHERE purged_at IS NULL AND status != 'draft' AND created_at < ?
+      `UPDATE messages SET body = '', subject = NULL, purged_at = ? WHERE purged_at IS NULL AND created_at < ?
          AND conversation_id IN (SELECT id FROM conversations WHERE clinic_id = ?)`,
     ).run(now, messagesBefore, clinicId).changes);
     const calls = Number(this.sql.prepare(
@@ -414,12 +430,12 @@ export class Db {
   // ---- conversations & messages -------------------------------------------
 
   getConversation(id: number): Conversation | undefined {
-    return this.one<Conversation>("SELECT * FROM conversations WHERE id = ?", id);
+    return this.decConversation(this.one<Conversation>("SELECT * FROM conversations WHERE id = ?", id));
   }
 
   conversationForContact(contact: Contact, channel: Channel): Conversation {
     const existing = this.one<Conversation>("SELECT * FROM conversations WHERE contact_id = ?", contact.id);
-    if (existing) return existing;
+    if (existing) return this.decConversation(existing);
     const id = this.run(
       "INSERT INTO conversations (clinic_id, contact_id, last_channel, last_message_at) VALUES (?, ?, ?, ?)",
       contact.clinic_id, contact.id, channel, new Date().toISOString(),
@@ -439,15 +455,16 @@ export class Db {
        ORDER BY c.needs_attention DESC, c.last_message_at DESC LIMIT 200`,
       clinicId,
     );
-    return rows.map((r) => ({ ...r, preview: this.vault.open(clinicId, `msg:${r.id}`, r.preview) }));
+    return rows.map((r) => ({ ...this.decConversation(r), preview: this.vault.open(clinicId, `msg:${r.id}`, r.preview) }));
   }
 
   updateConversation(id: number, fields: Partial<Pick<Conversation, "ai_enabled" | "needs_attention" | "attention_reason" | "unread" | "status" | "last_channel" | "last_message_at" | "paused_by">>): void {
     const entries = Object.entries(fields).filter(([, v]) => v !== undefined);
     if (!entries.length) return;
+    const clinicId = this.clinicOfConversation(id);
     this.run(
       `UPDATE conversations SET ${entries.map(([k]) => `${k} = ?`).join(", ")} WHERE id = ?`,
-      ...entries.map(([, v]) => v as string | number | null), id,
+      ...entries.map(([k, v]) => (k === "attention_reason" ? this.vault.seal(clinicId, `conv:${id}:reason`, v as string | null) : v as string | number | null)), id,
     );
   }
 
@@ -515,6 +532,25 @@ export class Db {
        WHERE c.contact_id = ? AND m.channel = ? AND m.direction = 'out' AND m.status IN ('sent','simulated') AND m.created_at >= ?`,
       contactId, channel, since,
     )?.n ?? 0);
+  }
+
+  deferAutomation(clinicId: number, automationId: string, subject: string, contactId: number, appointmentId: number | null): void {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS deferred_automations (
+      id INTEGER PRIMARY KEY, clinic_id INTEGER NOT NULL, automation_id TEXT NOT NULL, subject TEXT NOT NULL,
+      contact_id INTEGER NOT NULL, appointment_id INTEGER, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      UNIQUE (clinic_id, automation_id, subject))`);
+    this.sql.prepare("INSERT OR IGNORE INTO deferred_automations (clinic_id, automation_id, subject, contact_id, appointment_id) VALUES (?, ?, ?, ?, ?)")
+      .run(clinicId, automationId, subject, contactId, appointmentId);
+  }
+
+  /** Returns and removes the clinic's deferred funnel runs. */
+  takeDeferredAutomations(clinicId: number): { automation_id: string; subject: string; contact_id: number; appointment_id: number | null }[] {
+    const exists = this.sql.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'deferred_automations'").get();
+    if (!exists) return [];
+    const rows = this.all<{ id: number; automation_id: string; subject: string; contact_id: number; appointment_id: number | null }>(
+      "SELECT * FROM deferred_automations WHERE clinic_id = ? ORDER BY id", clinicId);
+    if (rows.length) this.run(`DELETE FROM deferred_automations WHERE id IN (${rows.map(() => "?").join(",")})`, ...rows.map((r) => r.id));
+    return rows;
   }
 
   /** Marketing/service campaign messages a clinic sent since a time (daily campaign cap). */
@@ -604,8 +640,9 @@ export class Db {
   createTask(t: { clinicId: number; contactId?: number | null; conversationId?: number | null; type: TaskType; priority?: Task["priority"]; title: string; details?: string | null; createdBy: string }): Task {
     const id = this.run(
       `INSERT INTO tasks (clinic_id, contact_id, conversation_id, type, priority, title, details, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      t.clinicId, t.contactId ?? null, t.conversationId ?? null, t.type, t.priority ?? "normal", t.title,
-      this.vault.seal(t.clinicId, `task:${t.clinicId}`, t.details ?? null), t.createdBy,
+      t.clinicId, t.contactId ?? null, t.conversationId ?? null, t.type, t.priority ?? "normal",
+      this.vault.seal(t.clinicId, `${this.taskAad(t.clinicId, t.contactId ?? null)}:title`, t.title),
+      this.vault.seal(t.clinicId, this.taskAad(t.clinicId, t.contactId ?? null), t.details ?? null), t.createdBy,
     );
     return this.getTask(id)!;
   }

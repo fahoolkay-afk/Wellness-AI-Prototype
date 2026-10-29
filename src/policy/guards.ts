@@ -59,18 +59,22 @@ export function wordingProblems(text: string, enabled: readonly WordingRule[] = 
   return hits;
 }
 
-// Clinical words (same list as the EHRM's clinical guard) plus body areas and conditions.
+// Clinical words (same list as the EHRM's clinical guard) plus body areas and conditions. Each entry is a
+// pattern matched as a whole word; "\w*" entries are stems that also catch plurals and job titles
+// ("physio" -> physiotherapist, physios; "chiro" -> chiropractor, chiro).
 const CLINICAL = [
-  "pain", "painful", "injury", "injuries", "injured", "disc", "disk", "tear", "tears", "torn", "sprain", "strain", "fracture",
-  "surgery", "surgical", "mri", "x-ray", "xray", "symptom", "symptoms", "symptomatic", "condition", "conditions", "medication",
-  "medications", "concussion", "sciatica", "arthritis", "tendonitis", "tendinitis", "whiplash", "migraine", "headaches", "pregnancy",
-  "pregnant", "postpartum", "pelvic", "rehab", "rehabilitation", "physio", "physiotherapy", "chiropractic", "chiropractor",
-  "massage", "osteopathic", "acupuncture", "therapy", "therapist", "mva", "accident", "wsib", "claim",
+  "pain\\w*", "injur\\w*", "dis[ck]s?", "tears?", "torn", "sprain\\w*", "strain\\w*", "fractur\\w*", "surg\\w*", "mris?", "x-?rays?",
+  "symptom\\w*", "conditions?", "medicat\\w*", "concuss\\w*", "sciatica", "arthritis", "tendon\\w*", "tendini\\w*", "whiplash", "migraines?",
+  "headaches?", "pregnan\\w*", "postpartum", "pelvic", "rehab\\w*", "physio\\w*", "chiro\\w*", "osteo\\w*", "massag\\w*", "acupunct\\w*",
+  "therap\\w*", "mvas?", "accidents?", "wsib", "claims?", "diagnos\\w*", "assessments?", "orthotic\\w*", "dry needling", "cupping",
 ];
 const BODY = [
-  "neck", "shoulder", "shoulders", "knee", "knees", "hip", "hips", "ankle", "ankles", "wrist", "wrists", "elbow", "elbows", "spine",
-  "spinal", "jaw", "tmj", "lower back", "upper back", "back pain", "foot", "feet", "hamstring", "rotator cuff", "achilles",
+  "necks?", "shoulders?", "knees?", "hips?", "ankles?", "wrists?", "elbows?", "spin(e|al)", "jaws?", "tmj", "(lower|upper|my|your|sore|bad) back",
+  "back (pain|injury|problems?|issues?)", "foot", "feet", "hamstrings?", "rotator cuff", "achilles", "sacroiliac", "lumbar", "cervical", "thoracic",
 ];
+const PATTERNS = [...CLINICAL, ...BODY].map((w) => [w, new RegExp(`\\b${w.replace(/-\?/g, "[- ]?")}\\b`)] as const);
+// Words that appear in practitioner titles but say nothing about health.
+const TITLE_FILLER = new Set(["registered", "licensed", "certified", "senior", "associate", "clinic", "director", "lead", "owner", "and", "the", "of"]);
 
 const SENSITIVE_CHANNELS: Channel[] = ["sms", "whatsapp", "messenger", "instagram"];
 
@@ -79,14 +83,17 @@ export function privacyProblems(text: string, channel: Channel, clinic: Clinic):
   // The clinic's own name (e.g. "Harbourfront Physio & Wellness") is not a disclosure about the patient.
   const lower = normalise(text).toLowerCase().split(clinic.profile.name.toLowerCase()).join(" ");
   const hits = new Set<string>();
-  for (const w of [...CLINICAL, ...BODY]) {
-    if (new RegExp(`\\b${w.replace(/[-]/g, "[- ]?")}\\b`).test(lower)) hits.add(w);
+  for (const [w, re] of PATTERNS) {
+    const m = re.exec(lower);
+    if (m) hits.add(m[0] || w);
   }
   for (const s of clinic.profile.services) {
     if (lower.includes(s.name.toLowerCase())) hits.add(`service "${s.name}"`);
   }
   for (const p of clinic.profile.practitioners) {
-    if (p.title && lower.includes(p.title.toLowerCase())) hits.add(`title "${p.title}"`);
+    for (const word of (p.title ?? "").toLowerCase().split(/[^a-z]+/)) {
+      if (word.length > 3 && !TITLE_FILLER.has(word) && new RegExp(`\\b${word}s?\\b`).test(lower)) hits.add(`title word "${word}"`);
+    }
   }
   return [...hits];
 }

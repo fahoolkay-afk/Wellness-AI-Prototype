@@ -247,6 +247,8 @@ export function createApp(s: Services): express.Express {
   app.post("/api/login/code", (req, res) => {
     const session = sessionOf(req);
     if (!session || session.scope !== "second") throw new HttpError(401, "Sign in again.");
+    if (!accounts.allowAttempt(ipOf(req))) throw new HttpError(429, "Too many sign-in attempts. Wait 15 minutes and try again.");
+    if (accounts.isLocked(session.user.id)) throw new HttpError(423, "This account is locked for 15 minutes after too many wrong tries.");
     if (!accounts.checkCode(session.user.id, String(req.body?.code ?? ""))) {
       audit.record({ actorType: "user", actor: session.user.username, action: "login.code", target: "session", outcome: "denied", ip: ipOf(req) });
       throw new HttpError(401, "That code didn't work. Check your phone app and try again.");
@@ -311,6 +313,10 @@ export function createApp(s: Services): express.Express {
   app.post("/api/me/totp/start", (req, res) => {
     const session = setupSession(req);
     if (session.user.must_change_password) throw new HttpError(409, "Change your temporary passphrase first.");
+    // Moving codes to a new phone from a signed-in session needs the passphrase again (a borrowed session isn't enough).
+    if (session.user.totp_enabled && !accounts.verifyPasswordOf(session.user.id, String(req.body?.current ?? ""))) {
+      throw new HttpError(403, "Enter your current passphrase to move codes to a new phone.");
+    }
     res.json(accounts.startTotpEnrolment(session.user.id, "Clinic Front Desk"));
   });
 
@@ -371,14 +377,15 @@ export function createApp(s: Services): express.Express {
     const off = events.on("changed", (e) => {
       if (e.clinicId === clinicId) res.write(`data: ${JSON.stringify(e)}\n\n`);
     });
+    // The stream ends within seconds of the session ending (logout, expiry, password change, disable).
+    let ticks = 0;
     const ping = setInterval(() => {
-      // The stream ends when the session does (logout, expiry, password change).
       if (!accounts.readSession(token, { touch: false })) {
         res.end();
         return;
       }
-      res.write(": ping\n\n");
-    }, 20_000);
+      if (++ticks % 4 === 0) res.write(": ping\n\n");
+    }, 5_000);
     req.on("close", () => {
       off();
       clearInterval(ping);
@@ -579,7 +586,7 @@ export function createApp(s: Services): express.Express {
     if (!channel || !purpose || !status) throw new HttpError(400, "Pick a channel, a purpose and granted or withdrawn.");
     if (status === "granted" && !source) throw new HttpError(400, "Say how the patient gave consent (for example: intake form, said yes on the phone).");
     // An SMS STOP can only be lifted by the patient texting START (carrier rule).
-    if (status === "granted" && channel === "sms" && consents.latest(contact.id, "sms", "service")?.basis === "keyword" && consents.latest(contact.id, "sms", "service")?.status === "withdrawn") {
+    if (status === "granted" && channel === "sms" && ((consents.latest(contact.id, "sms", "service")?.basis === "keyword" && consents.latest(contact.id, "sms", "service")?.status === "withdrawn") || consents.addressBlock(contact.id, "sms"))) {
       throw new HttpError(409, "This patient texted STOP. Only they can turn texts back on, by texting START.");
     }
     consents.record({ clinicId: contact.clinic_id, contactId: contact.id, channel, purpose, status, basis: status === "granted" ? (purpose === "marketing" ? "express" : "staff") : "staff", source: source || "withdrawn by staff on the patient's request", textVersion: req.body?.textVersion ? String(req.body.textVersion).slice(0, 40) : null, by: sess(res).user.username });
@@ -754,6 +761,8 @@ export function createApp(s: Services): express.Express {
     channel: body.channel === "preferred" ? "preferred" : ALL_CHANNELS_BUT_VOICE.find((c) => c === body.channel) ?? "preferred",
     purpose: body.purpose === "service" ? "service" : "marketing",
   });
+  const usedConfirmations = new Map<string, number>();
+  const campaignsRunning = new Set<number>();
   const confirmToken = (clinicId: number, opts: CampaignOptions, eligible: number, userId: number, minute: number) =>
     hmac(db.vault.purposeKey(clinicId, "campaign-confirm"), JSON.stringify([opts, eligible, userId, minute])).slice(0, 32);
 
@@ -777,15 +786,22 @@ export function createApp(s: Services): express.Express {
     const token = String(req.body?.confirmToken ?? "");
     const valid = Array.from({ length: 15 }, (_, i) => confirmToken(clinic.id, opts, preview.eligible, sess(res).user.id, minute - i)).some((t) => safeEqual(t, token));
     if (!valid) throw new HttpError(409, "The audience or message changed since the preview. Preview again before sending.");
+    // Each confirmation works once, and a clinic runs one campaign at a time (no double sends).
+    const used = sha256(`${clinic.id}:${token}`);
+    for (const [k, exp] of usedConfirmations) if (exp < Date.now()) usedConfirmations.delete(k);
+    if (usedConfirmations.has(used)) throw new HttpError(409, "This campaign was already sent. Preview again to send another.");
+    if (campaignsRunning.has(clinic.id)) throw new HttpError(409, "A campaign is still sending for this clinic. Try again when it finishes.");
     const sentToday = db.campaignMessagesSince(clinic.id, new Date(Date.now() - 24 * 3600_000).toISOString());
     if (sentToday + preview.eligible > DAILY_CAMPAIGN_CAP) throw new HttpError(429, `That would pass the daily campaign limit of ${DAILY_CAMPAIGN_CAP} messages.`);
     audit.record({ ...actor(req, res), clinicId: clinic.id, action: "campaign.send", target: `campaign:${sha256(opts.name).slice(0, 8)}`, outcome: "ok", detail: `${preview.eligible} recipients, ${opts.purpose}` });
+    usedConfirmations.set(used, Date.now() + 20 * 60_000);
+    campaignsRunning.add(clinic.id);
     const staff = staffOf(res);
     // Sent in the background so a large audience doesn't hold the request open.
     void s.automations.broadcast(clinic, opts, staff).then((r) => {
       audit.record({ actorType: "system", actor: "campaign", clinicId: clinic.id, action: "campaign.done", outcome: "ok", detail: `${r.sent} sent, ${r.skipped} skipped` });
       changed(clinic.id, "campaign");
-    }).catch((err) => console.error("[campaign]", (err as Error).message));
+    }).catch((err) => console.error("[campaign]", (err as Error).message)).finally(() => campaignsRunning.delete(clinic.id));
     res.status(202).json({ queued: preview.eligible });
   });
 
@@ -813,8 +829,11 @@ export function createApp(s: Services): express.Express {
   api.post("/users/:id/:action", (req, res) => {
     need(res, "users.manage");
     const user = accounts.getUser(num(req.params.id));
-    const shared = user ? accounts.clinicsOf(user.id).filter((c) => sess(res).clinicIds.includes(c)) : [];
+    const theirs = user ? accounts.clinicsOf(user.id) : [];
+    const shared = theirs.filter((c) => sess(res).clinicIds.includes(c));
     if (!user || !shared.length) throw new HttpError(404, "Not found");
+    // Resetting someone hands over their access, so it's only allowed when you cover every clinic they work at.
+    if (shared.length !== theirs.length) throw new HttpError(403, "This person also works at a clinic you don't manage. Ask the operator to change their account (npm run cli -- reset-user).");
     if (user.id === sess(res).user.id) throw new HttpError(400, "You can't change your own account here.");
     const action = String(req.params.action);
     let out: Record<string, unknown> = { ok: true };
@@ -867,6 +886,7 @@ export function createApp(s: Services): express.Express {
 
   app.use("/api", api);
 
+  let chainCache: { at: number; result: ReturnType<typeof audit.verify> } | undefined;
   app.get("/healthz", (_req, res) => {
     let dbOk = true;
     try {
@@ -874,7 +894,9 @@ export function createApp(s: Services): express.Express {
     } catch {
       dbOk = false;
     }
-    const chain = audit.verify();
+    // Re-checking the whole chain is costly, and this route needs no sign-in: check at most every 5 minutes.
+    if (!chainCache || Date.now() - chainCache.at > 5 * 60_000) chainCache = { at: Date.now(), result: audit.verify() };
+    const chain = chainCache.result;
     const tickAge = s.maintenance.lastRun ? Date.now() - Date.parse(s.maintenance.lastRun) : null;
     const ok = dbOk && chain.ok && audit.triggersPresent();
     res.status(ok ? 200 : 503).json({ ok, db: dbOk, auditChain: chain.ok, maintenanceMinutesAgo: tickAge === null ? null : Math.round(tickAge / 60_000), lastBackup: s.maintenance.lastBackup ?? null });

@@ -52,7 +52,24 @@ export class Automations {
     for (const automation of clinic.profile.automations) {
       if (!automation.enabled || automation.trigger.type !== type) continue;
       if (automation.trigger.type === "tag_added" && automation.trigger.tag !== tag) continue;
+      // Quiet hours: a funnel that sends a message waits for the morning (the next tick after quiet hours end).
+      if (automation.actions.some((a) => a.type === "send_message") && inQuietHours(clinic, new Date())) {
+        this.db.deferAutomation(clinic.id, automation.id, subject, contact.id, appt?.id ?? null);
+        continue;
+      }
       await this.run(clinic, automation, subject, contact, appt);
+    }
+  }
+
+  /** Runs event funnels that were held back during quiet hours. */
+  private async releaseDeferred(clinic: Clinic): Promise<void> {
+    for (const d of this.db.takeDeferredAutomations(clinic.id)) {
+      const automation = clinic.profile.automations.find((a) => a.id === d.automation_id && a.enabled);
+      const contact = this.db.getContact(d.contact_id);
+      const appt = d.appointment_id ? this.db.getAppointment(d.appointment_id) : undefined;
+      // A booking that was cancelled overnight no longer gets its confirmation.
+      if (!automation || !contact || (appt && automation.trigger.type === "appointment_booked" && appt.status !== "booked")) continue;
+      await this.run(clinic, automation, d.subject, contact, appt);
     }
   }
 
@@ -62,6 +79,7 @@ export class Automations {
     const iso = (ms: number) => new Date(ms).toISOString();
     for (const clinic of this.db.listClinics()) {
       if (inQuietHours(clinic, now)) continue;
+      await this.releaseDeferred(clinic);
       for (const automation of clinic.profile.automations) {
         if (!automation.enabled) continue;
         const trigger = automation.trigger;

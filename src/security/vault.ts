@@ -36,6 +36,11 @@ export class Vault {
     }
   }
 
+  /** Like open(), but throws instead of returning a placeholder. For secrets, where a placeholder would fail open. */
+  openStrict(clinicId: number, aad: string, value: string): string {
+    return open(this.key(clinicId), value, aad);
+  }
+
   /** A clinic-scoped key for another purpose (e.g. signing unsubscribe links). */
   purposeKey(clinicId: number, purpose: string): Buffer {
     return deriveKey(this.master, `clinic:${clinicId}:${purpose}`);

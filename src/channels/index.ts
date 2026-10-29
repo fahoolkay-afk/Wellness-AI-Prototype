@@ -25,6 +25,11 @@ export function reachableChannels(contact: Contact): Channel[] {
 }
 
 /** North American Numbering Plan (+1): Canada, the US and some Caribbean nations. */
+/** CASL s.11: every marketing message carries a way to stop. Our keyword handling understands "stop" on every channel. */
+function optOut(body: string, purpose: "service" | "marketing"): string {
+  return purpose === "marketing" ? `${body}\nReply STOP to opt out.` : body;
+}
+
 export function isNanp(phone: string): boolean {
   const digits = phone.replace(/\D/g, "");
   return digits.length === 11 && digits.startsWith("1") && /^1[2-9]\d{2}[2-9]\d{6}$/.test(digits);
@@ -54,13 +59,13 @@ export class Channels {
         return sendSms(this.config, from, contact.phone, opts.purpose === "marketing" ? `${body}\nReply STOP to opt out.` : body, this.fetchImpl);
       case "whatsapp":
         if (!contact.whatsapp_id) throw new ChannelError("Patient has no WhatsApp");
-        return sendWhatsApp(this.config, from, contact.whatsapp_id, body, this.fetchImpl);
+        return sendWhatsApp(this.config, from, contact.whatsapp_id, optOut(body, opts.purpose), this.fetchImpl);
       case "messenger":
         if (!contact.messenger_id) throw new ChannelError("Patient has no Messenger id");
-        return sendPageMessage(this.config, contact.messenger_id, body, this.fetchImpl);
+        return sendPageMessage(this.config, contact.messenger_id, optOut(body, opts.purpose), this.fetchImpl);
       case "instagram":
         if (!contact.instagram_id) throw new ChannelError("Patient has no Instagram id");
-        return sendPageMessage(this.config, contact.instagram_id, body, this.fetchImpl);
+        return sendPageMessage(this.config, contact.instagram_id, optOut(body, opts.purpose), this.fetchImpl);
       case "email": {
         if (!contact.email) throw new ChannelError("Patient has no email address");
         const marketing = opts.purpose === "marketing";

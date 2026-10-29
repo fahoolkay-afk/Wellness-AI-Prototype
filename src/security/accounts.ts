@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
   totp_secret TEXT,
   totp_enabled INTEGER NOT NULL DEFAULT 0,
   totp_last_counter INTEGER,
+  totp_pending TEXT,
   failed_logins INTEGER NOT NULL DEFAULT 0,
   locked_until TEXT,
   disabled INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +89,9 @@ export class Accounts {
     this.vault = vault;
     this.opts = opts;
     db.exec(SCHEMA);
+    // Older databases: a new phone-app secret waits here until confirmed, so the old one keeps working.
+    const cols = (db.prepare("PRAGMA table_info(users)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("totp_pending")) db.exec("ALTER TABLE users ADD COLUMN totp_pending TEXT");
   }
 
   private q<T>(sql: string, ...p: (string | number | null)[]): T | undefined {
@@ -169,12 +173,24 @@ export class Accounts {
     return { ok: true, user, next: "done" };
   }
 
-  /** Second step: checks the phone-app code; a code can't be used twice. */
+  /** Second step: checks the phone-app code; a code can't be used twice, and a locked account can't keep guessing. */
   checkCode(userId: number, code: string): boolean {
-    const row = this.q<{ totp_secret: string | null; totp_last_counter: number | null }>("SELECT totp_secret, totp_last_counter FROM users WHERE id = ?", userId);
-    if (!row?.totp_secret) return false;
-    const secret = this.vault.open(0, `totp:${userId}`, row.totp_secret) ?? "";
-    const counter = verifyTotp(secret, code, row.totp_last_counter);
+    const row = this.q<{ totp_secret: string | null; totp_last_counter: number | null; locked_until: string | null; disabled: number }>(
+      "SELECT totp_secret, totp_last_counter, locked_until, disabled FROM users WHERE id = ?", userId);
+    if (!row?.totp_secret || row.disabled) return false;
+    if (row.locked_until && row.locked_until > new Date().toISOString()) return false;
+    return this.verifyAgainst(userId, row.totp_secret, row.totp_last_counter, code);
+  }
+
+  private verifyAgainst(userId: number, sealed: string, lastCounter: number | null, code: string): boolean {
+    let secret: string;
+    try {
+      secret = this.vault.openStrict(0, `totp:${userId}`, sealed);
+    } catch {
+      // Unreadable secret (wrong DATA_KEY or tampering): fail closed; the owner must reset this account.
+      return false;
+    }
+    const counter = verifyTotp(secret, code, lastCounter);
     if (counter === undefined) {
       this.registerFailure(userId);
       return false;
@@ -183,25 +199,39 @@ export class Accounts {
     return true;
   }
 
+  isLocked(userId: number): boolean {
+    const row = this.q<{ locked_until: string | null }>("SELECT locked_until FROM users WHERE id = ?", userId);
+    return !!row?.locked_until && row.locked_until > new Date().toISOString();
+  }
+
   private registerFailure(userId: number): void {
     const row = this.q<{ failed_logins: number }>("SELECT failed_logins FROM users WHERE id = ?", userId);
     const fails = (row?.failed_logins ?? 0) + 1;
     const lock = fails >= MAX_FAILS ? new Date(Date.now() + LOCK_MINUTES * 60_000).toISOString() : null;
     this.db.prepare("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?").run(lock ? 0 : fails, lock, userId);
+    // Locking ends half-finished sign-ins too, so open code prompts can't keep guessing.
+    if (lock) this.db.prepare("DELETE FROM sessions WHERE user_id = ? AND scope != 'full'").run(userId);
   }
 
+  /** Starts (re-)enrolment. The new secret is pending; any current phone app keeps working until it's confirmed. */
   startTotpEnrolment(userId: number, issuer: string): { secret: string; uri: string } {
     const user = this.getUser(userId)!;
     const secret = newTotpSecret();
-    this.db.prepare("UPDATE users SET totp_secret = ?, totp_enabled = 0, totp_last_counter = NULL WHERE id = ?")
-      .run(this.vault.seal(0, `totp:${userId}`, secret), userId);
+    this.db.prepare("UPDATE users SET totp_pending = ? WHERE id = ?").run(this.vault.seal(0, `totp:${userId}`, secret), userId);
     return { secret, uri: otpauthUri(secret, user.username, issuer) };
   }
 
   confirmTotpEnrolment(userId: number, code: string): boolean {
-    if (!this.checkCode(userId, code)) return false;
-    this.db.prepare("UPDATE users SET totp_enabled = 1 WHERE id = ?").run(userId);
+    const row = this.q<{ totp_pending: string | null; locked_until: string | null }>("SELECT totp_pending, locked_until FROM users WHERE id = ?", userId);
+    if (!row?.totp_pending || (row.locked_until && row.locked_until > new Date().toISOString())) return false;
+    if (!this.verifyAgainst(userId, row.totp_pending, null, code)) return false;
+    this.db.prepare("UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_enabled = 1 WHERE id = ?").run(userId);
     return true;
+  }
+
+  verifyPasswordOf(userId: number, password: string): boolean {
+    const row = this.q<{ password_hash: string }>("SELECT password_hash FROM users WHERE id = ?", userId);
+    return !!row && verifyPassword(password, row.password_hash);
   }
 
   changePassword(userId: number, current: string, next: string): string | undefined {
@@ -219,7 +249,7 @@ export class Accounts {
   resetCredentials(userId: number): string {
     const temp = randomToken(12);
     this.db.prepare(
-      `UPDATE users SET password_hash = ?, must_change_password = 1, totp_secret = NULL, totp_enabled = 0, totp_last_counter = NULL,
+      `UPDATE users SET password_hash = ?, must_change_password = 1, totp_secret = NULL, totp_pending = NULL, totp_enabled = 0, totp_last_counter = NULL,
          failed_logins = 0, locked_until = NULL, credential_version = credential_version + 1 WHERE id = ?`,
     ).run(hashPassword(temp), userId);
     this.revokeAll(userId);

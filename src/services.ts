@@ -40,7 +40,12 @@ export function createServices(config: Config, overrides: { db?: Db; responder?:
   const accounts = new Accounts(db.sql, db.vault, {
     idleMinutes: config.security.idleMinutes, sessionHours: config.security.sessionHours, requireTotp: config.security.requireTotp,
   });
-  const consents = new Consents(db.sql);
+  const consents = new Consents(db.sql, (contactId, channel) => {
+    const c = db.getContact(contactId);
+    if (!c) return undefined;
+    const address = { sms: c.phone, voice: c.phone, whatsapp: c.whatsapp_id, email: c.email?.toLowerCase() ?? null, messenger: c.messenger_id, instagram: c.instagram_id }[channel] ?? null;
+    return { clinicId: c.clinic_id, address };
+  });
   const unsubscribe = new UnsubscribeLinks(db.vault, config.publicUrl);
   const backends = createBackends(db, config, overrides.fetchImpl);
   const channels = new Channels(db, config, (clinicId, contactId, channel) => unsubscribe.url(clinicId, contactId, channel), overrides.fetchImpl);

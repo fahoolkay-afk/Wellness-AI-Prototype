@@ -8,6 +8,11 @@
 //
 // A withdrawal on a channel ("STOP", "unsubscribe", "please stop texting me") stops everything on that
 // channel. Shaped so it exports directly as a FHIR R4 Consent resource.
+//
+// Each row records the address it was given for (phone, email, social id). A "yes" counts only while the
+// contact still has that address, so editing a phone number never carries consent over to a stranger.
+// A carrier STOP/START (or an unsubscribe link) applies to the address itself, so it also covers other
+// patient records that share the number (a parent and child, for example).
 
 import type { DatabaseSync } from "node:sqlite";
 import type { Channel } from "./types.ts";
@@ -23,6 +28,7 @@ CREATE TABLE IF NOT EXISTS consents (
   basis TEXT NOT NULL,
   source TEXT NOT NULL,
   text_version TEXT,
+  address TEXT,
   recorded_by TEXT NOT NULL,
   recorded_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -48,25 +54,51 @@ export interface ConsentRow {
   basis: ConsentBasis;
   source: string;
   text_version: string | null;
+  address: string | null;
   recorded_by: string;
   recorded_at: string;
 }
 
 export type SendPurpose = "reply" | ConsentPurpose;
 
+/** The contact's clinic and current address on a channel (normalised; null when they have none). */
+export type AddressOf = (contactId: number, channel: Channel) => { clinicId: number; address: string | null } | undefined;
+
 export class Consents {
   private readonly db: DatabaseSync;
+  private readonly addressOf: AddressOf;
 
-  constructor(db: DatabaseSync) {
+  constructor(db: DatabaseSync, addressOf: AddressOf) {
     this.db = db;
+    this.addressOf = addressOf;
     db.exec(SCHEMA);
+    const cols = (db.prepare("PRAGMA table_info(consents)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("address")) db.exec("ALTER TABLE consents ADD COLUMN address TEXT");
+    db.exec("CREATE INDEX IF NOT EXISTS consents_address ON consents(clinic_id, channel, address, id)");
   }
 
   record(c: { clinicId: number; contactId: number; channel: Channel; purpose: ConsentPurpose; status: ConsentStatus; basis: ConsentBasis; source: string; textVersion?: string | null; by: string }): void {
     this.db.prepare(
-      `INSERT INTO consents (clinic_id, contact_id, channel, purpose, status, basis, source, text_version, recorded_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(c.clinicId, c.contactId, c.channel, c.purpose, c.status, c.basis, c.source.slice(0, 200), c.textVersion ?? null, c.by);
+      `INSERT INTO consents (clinic_id, contact_id, channel, purpose, status, basis, source, text_version, address, recorded_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(c.clinicId, c.contactId, c.channel, c.purpose, c.status, c.basis, c.source.slice(0, 200), c.textVersion ?? null, this.addressOf(c.contactId, c.channel)?.address ?? null, c.by);
+  }
+
+  /** A carrier STOP/START or unsubscribe on this exact address, whichever patient record it was recorded on. */
+  addressBlock(contactId: number, channel: Channel): ConsentRow | undefined {
+    const where = this.addressOf(contactId, channel);
+    if (!where?.address) return undefined;
+    const row = this.db.prepare(
+      `SELECT * FROM consents WHERE clinic_id = ? AND channel = ? AND address = ?
+         AND basis IN ('keyword','link') AND purpose = 'service' ORDER BY id DESC LIMIT 1`,
+    ).get(where.clinicId, channel, where.address) as ConsentRow | undefined;
+    return row?.status === "withdrawn" ? row : undefined;
+  }
+
+  /** A "yes" counts only for the address it was given for; a withdrawal stands whatever the address. */
+  private effective(row: ConsentRow | undefined, contactId: number, channel: Channel): ConsentRow | undefined {
+    if (!row || row.status === "withdrawn") return row;
+    return row.address && row.address === this.addressOf(contactId, channel)?.address ? row : undefined;
   }
 
   latest(contactId: number, channel: Channel, purpose: ConsentPurpose): ConsentRow | undefined {
@@ -81,9 +113,9 @@ export class Consents {
 
   /** Records that the patient reached out on this channel (implied consent for service replies on it). */
   noteInbound(clinicId: number, contactId: number, channel: Channel): void {
-    const current = this.latest(contactId, channel, "service");
+    const current = this.effective(this.latest(contactId, channel, "service"), contactId, channel);
     // An SMS STOP is lifted only by START (carrier rule); other channels re-open when the patient writes again.
-    if (current?.status === "withdrawn" && channel === "sms") return;
+    if (channel === "sms" && (current?.status === "withdrawn" || this.addressBlock(contactId, channel))) return;
     if (current?.status === "granted") return;
     this.record({ clinicId, contactId, channel, purpose: "service", status: "granted", basis: "inbound", source: `patient messaged on ${channel}`, by: "system" });
   }
@@ -100,13 +132,13 @@ export class Consents {
    * reply: answering a message the patient just sent (allowed unless they stopped this channel).
    */
   check(contactId: number, channel: Channel, purpose: SendPurpose): { ok: true } | { ok: false; reason: string } {
-    const service = this.latest(contactId, channel, "service");
-    if (service?.status === "withdrawn") return { ok: false, reason: `Patient opted out of ${channel} messages` };
+    const service = this.effective(this.latest(contactId, channel, "service"), contactId, channel);
+    if (service?.status === "withdrawn" || this.addressBlock(contactId, channel)) return { ok: false, reason: `Patient opted out of ${channel} messages` };
     if (purpose === "reply") return { ok: true };
     if (purpose === "service") {
       return service?.status === "granted" ? { ok: true } : { ok: false, reason: `No consent on record to send ${channel} reminders to this patient` };
     }
-    const marketing = this.latest(contactId, channel, "marketing");
+    const marketing = this.effective(this.latest(contactId, channel, "marketing"), contactId, channel);
     if (marketing?.status === "granted" && marketing.basis === "express") return { ok: true };
     return { ok: false, reason: `No express marketing consent for ${channel}` };
   }
@@ -115,8 +147,9 @@ export class Consents {
   summary(contactId: number): Record<string, { service: ConsentStatus | "none"; marketing: ConsentStatus | "none"; since?: string }> {
     const out: Record<string, { service: ConsentStatus | "none"; marketing: ConsentStatus | "none"; since?: string }> = {};
     for (const ch of ["sms", "whatsapp", "email", "messenger", "instagram"] as Channel[]) {
-      const s = this.latest(contactId, ch, "service");
-      const m = this.latest(contactId, ch, "marketing");
+      const blocked = this.addressBlock(contactId, ch);
+      const s = blocked ?? this.effective(this.latest(contactId, ch, "service"), contactId, ch);
+      const m = blocked ? { status: "withdrawn" as const } : this.effective(this.latest(contactId, ch, "marketing"), contactId, ch);
       out[ch] = { service: s?.status ?? "none", marketing: m?.status ?? "none", since: s?.recorded_at };
     }
     return out;

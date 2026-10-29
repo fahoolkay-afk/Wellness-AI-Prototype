@@ -11,16 +11,6 @@ interface PostmarkHeader {
   Value?: string;
 }
 
-/**
- * Email "From" is easy to forge. Postmark passes the receiving server's authentication results; we trust
- * the sender only when DMARC passed (or SPF and DKIM both passed).
- */
-export function senderAuthenticated(headers: PostmarkHeader[] | undefined): boolean {
-  const all = (headers ?? []).filter((h) => /^(authentication-results|arc-authentication-results|received-spf)$/i.test(h.Name ?? "")).map((h) => (h.Value ?? "").toLowerCase()).join(" ");
-  if (/dmarc=pass/.test(all)) return true;
-  return /spf=pass/.test(all) && /dkim=pass/.test(all);
-}
-
 interface PostmarkInbound {
   Headers?: PostmarkHeader[];
   FromFull?: { Email?: string; Name?: string };
@@ -42,7 +32,9 @@ export function parseEmailInbound(p: PostmarkInbound): InboundMessage | undefine
   return {
     channel: "email", from: from.toLowerCase(), to: to.toLowerCase(), fromName: p.FromFull?.Name || p.FromName,
     subject: p.Subject ?? "", body: (p.StrippedTextReply || p.TextBody || "").trim(), externalId: p.MessageID,
-    senderVerified: senderAuthenticated(p.Headers),
+    // Email "From" is easy to forge, and authentication headers in the message can be written by the sender,
+    // so email never proves identity. Existing appointments are shared only after a one-time code.
+    senderVerified: false,
   };
 }
 

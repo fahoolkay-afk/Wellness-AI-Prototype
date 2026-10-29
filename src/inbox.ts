@@ -349,8 +349,12 @@ export class Inbox {
     const contact = this.db.getContact(conversation.contact_id)!;
     const channel = opts.channel ?? conversation.last_channel;
     if (channel === "voice" || !reachableChannels(contact).includes(channel)) throw new ChannelError("This patient can't be reached on that channel");
-    // An answer to something the patient wrote on this channel is a reply; anything else needs reminder-level consent.
-    const purpose: SendPurpose = this.db.lastInboundAt(conversationId, channel) ? "reply" : "service";
+    // An answer to something the patient recently wrote on this channel is a reply (24 hours on Meta channels,
+    // 7 days elsewhere). Anything older is the clinic starting a conversation: it needs reminder-level consent and
+    // passes the privacy and template-window checks.
+    const lastIn = this.db.lastInboundAt(conversationId, channel);
+    const replyWindow = SESSION_CHANNELS.includes(channel) ? 24 * 3600_000 : 7 * 24 * 3600_000;
+    const purpose: SendPurpose = lastIn && Date.now() - Date.parse(lastIn) < replyWindow ? "reply" : "service";
     const problem = this.sendProblem(clinic, contact, conversationId, channel, body, { purpose });
     if (problem) throw new ChannelError(problem);
     this.db.updateConversation(conversationId, {
