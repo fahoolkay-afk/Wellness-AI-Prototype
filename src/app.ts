@@ -9,6 +9,7 @@ import { parseMetaWebhook, verifyMetaSignature } from "./channels/meta.ts";
 import { parseTelnyxInbound, parseTwilioInbound, verifyTelnyxSignature, verifyTwilioSignature } from "./channels/sms.ts";
 import { verifyElevenLabsSignature } from "./channels/voice.ts";
 import { bridgeRouter } from "./bridge/routes.ts";
+import { SERVICE_LABEL, WEB_TEXT_CONSENT, WEB_TEXT_CONSENT_VERSION } from "./bridge/service.ts";
 import { toFhirConsent } from "./consent.ts";
 import { normalizePhone, parseTags } from "./db.ts";
 import {
@@ -206,6 +207,67 @@ export function createApp(s: Services): express.Express {
 
   // EHRM bridge: requests started by the clinic laptop, signed with the clinic's own bridge key (no /api session).
   app.use("/bridge/v1", bridgeRouter({ db, audit, bridge: s.bridge }));
+
+  // ---------------------------------------------------- website booking and sealed patient forms (contract 12, v1.2)
+  // Public pages, no session. Each takes a short, fixed body; everything is rate limited per client address.
+  const hits = new Map<string, number[]>();
+  const limited = (key: string, max: number, windowMs: number) => {
+    const t = Date.now();
+    const list = (hits.get(key) ?? []).filter((x) => t - x < windowMs);
+    if (hits.size > 20_000) hits.clear();
+    list.push(t);
+    hits.set(key, list);
+    return list.length > max;
+  };
+  const publicPage = (file: string) => fileURLToPath(new URL(`../public/${file}`, import.meta.url));
+  const bookingClinic = (id: unknown) => {
+    const clinic = /^\d{1,9}$/.test(String(id)) ? db.getClinic(Number(id)) : undefined;
+    return clinic && s.bridge.enabled(clinic.id) ? clinic : undefined;
+  };
+  app.get("/book/:clinicId", (req, res) => {
+    if (!bookingClinic(req.params.clinicId)) throw new HttpError(404, "Not found");
+    res.sendFile(publicPage("book.html"));
+  });
+  app.get("/public/book/:clinicId", (req, res) => {
+    const clinic = bookingClinic(req.params.clinicId);
+    if (!clinic) throw new HttpError(404, "Not found");
+    res.json({ clinicName: clinic.profile.name || clinic.name, phone: clinic.profile.phone, address: clinic.profile.address, timezone: clinic.profile.timezone,
+      services: Object.entries(SERVICE_LABEL).map(([code, label]) => ({ code, label })), consentText: WEB_TEXT_CONSENT, consentVersion: WEB_TEXT_CONSENT_VERSION });
+  });
+  app.post("/public/book/:clinicId", json("8kb"), (req, res) => {
+    const clinic = bookingClinic(req.params.clinicId);
+    if (!clinic) throw new HttpError(404, "Not found");
+    if (limited(`book:${ipOf(req)}`, 10, 3600_000)) throw new HttpError(429, "Too many requests from this connection. Please call the clinic.");
+    const out = s.bridge.bookFromWebsite(clinic, req.body);
+    if (!out.ok) throw new HttpError(out.status, out.message);
+    changed(clinic.id, "conversation");
+    res.json({ ok: true });
+  });
+  const formToken = (req: Request) => String(req.params.token ?? "");
+  app.get("/f/:token", (req, res) => {
+    if (limited(`form:${ipOf(req)}`, 60, 3600_000)) throw new HttpError(429, "Too many requests");
+    res.sendFile(publicPage("form.html"));
+  });
+  app.get("/f/:token/meta", (req, res) => {
+    if (limited(`form:${ipOf(req)}`, 60, 3600_000)) throw new HttpError(429, "Too many requests");
+    const out = s.bridge.formMeta(formToken(req));
+    if (out.status !== 200) {
+      res.status(out.status).json({ error: out.status === 410 ? "This link has already been used or has expired. Please contact the clinic for a new one." : "This link is not valid." });
+      return;
+    }
+    res.json(out.meta);
+  });
+  app.post("/f/:token", json("80kb"), (req, res) => {
+    if (limited(`form-submit:${ipOf(req)}`, 10, 3600_000)) throw new HttpError(429, "Too many requests");
+    const out = s.bridge.submitForm(formToken(req), req.body);
+    if (out.status !== 200) {
+      const message = out.status === 410 ? "This link has already been used or has expired. Please contact the clinic for a new one."
+        : out.status === 404 ? "This link is not valid." : out.code === "stale_key" ? "The clinic updated its security key. Please reload this page and send again." : "The form could not be read. Please reload and try again.";
+      res.status(out.status).json({ error: message });
+      return;
+    }
+    res.json({ ok: true });
+  });
 
   // ---------------------------------------------------- unsubscribe (CASL s.11)
 

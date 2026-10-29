@@ -220,6 +220,47 @@ export function bridgeRouter(deps: { db: Db; audit: AuditLog; bridge: Bridge; ra
     reply(res, 200, { ok: true, results });
   }));
 
+  // ------------------------------------------------------------------ sealed patient forms (v1.2, contract 12.2)
+
+  router.put("/form-key", raw("4kb"), authenticate, handle((req, res) => {
+    const { pairing, actor } = res.locals as Locals;
+    const body = exactKeys(json(req), ["locationId", "keyId", "publicKey"]);
+    location(res, body);
+    need(isStr(body.keyId, REF.formKey));
+    // An uncompressed P-256 point: 65 bytes, starting 0x04, as base64url (87 characters).
+    need(isStr(body.publicKey, /^[A-Za-z0-9_-]{87}$/) && Buffer.from(body.publicKey as string, "base64url")[0] === 4);
+    bridge.setFormKey(pairing.clinicId, body.keyId as string, body.publicKey as string);
+    audit.record({ actorType: "device", actor, role: "bridge", clinicId: pairing.clinicId, action: "bridge.form_key", target: `form-key:${body.keyId}`, outcome: "ok" });
+    reply(res, 200, { ok: true });
+  }));
+
+  router.post("/forms", raw("4kb"), authenticate, handle((req, res) => {
+    const { pairing, actor } = res.locals as Locals;
+    const body = exactKeys(json(req), ["locationId", "formRef", "firstName", "sections", "expiresAt"]);
+    location(res, body);
+    need(isStr(body.formRef, REF.form) && cleanName(body.firstName));
+    const sections = body.sections;
+    need(Array.isArray(sections) && sections.length >= 1 && sections.length <= 2 && new Set(sections).size === sections.length
+      && (sections as unknown[]).every((x) => x === "details" || x === "intake"));
+    need(isStr(body.expiresAt, ISO_OFFSET));
+    const exp = Date.parse(body.expiresAt as string);
+    need(!Number.isNaN(exp) && exp > Date.now() && exp <= Date.now() + 14 * DAY, "out_of_window");
+    const out = bridge.createForm(pairing.clinicId, { formRef: body.formRef as string, firstName: body.firstName as string, sections: sections as string[], expiresAt: new Date(exp).toISOString() });
+    if ("code" in out) fail(409, out.code);
+    audit.record({ actorType: "device", actor, role: "bridge", clinicId: pairing.clinicId, action: "bridge.form.invite", target: `form:${body.formRef}`, outcome: "ok", detail: `sections=${(sections as string[]).join("+")}` });
+    reply(res, 200, { ok: true, url: (out as { url: string }).url });
+  }));
+
+  router.post("/forms/revoke", raw("4kb"), authenticate, handle((req, res) => {
+    const { pairing, actor } = res.locals as Locals;
+    const body = exactKeys(json(req), ["locationId", "formRef"]);
+    location(res, body);
+    need(isStr(body.formRef, REF.form));
+    const revoked = bridge.revokeForm(pairing.clinicId, body.formRef as string);
+    audit.record({ actorType: "device", actor, role: "bridge", clinicId: pairing.clinicId, action: "bridge.form.revoke", target: `form:${body.formRef}`, outcome: "ok", detail: `revoked=${revoked}` });
+    reply(res, 200, { ok: true, revoked });
+  }));
+
   // ------------------------------------------------------------------ inbox (events, pulled by the laptop)
 
   router.get("/inbox", authenticate, handle((req, res) => {

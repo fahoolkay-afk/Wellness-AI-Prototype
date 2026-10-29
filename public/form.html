@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Your details for the clinic</title>
+<link rel="stylesheet" href="/patient.css">
+</head>
+<body>
+<main>
+  <header class="clinic"><span class="name" id="clinic-name">Loading…</span></header>
+  <div id="err" role="alert"></div>
+  <form id="form" class="stack" novalidate hidden>
+    <div class="card">
+      <h1 id="hello"></h1>
+      <p class="muted small">Fill in what you are comfortable sharing now. Anything you leave blank, the clinic can ask you at your visit.</p>
+      <div class="note lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        <span><b>Encrypted on this device.</b> Your answers are locked before they leave your phone or tablet, and only the clinic's own computer can open them. This link works once.</span></div>
+    </div>
+
+    <section class="card" id="sec-details" hidden>
+      <h2>Your details</h2>
+      <div class="row">
+        <label class="f">Family name<input id="d-family" autocomplete="family-name" maxlength="60"></label>
+        <label class="f">Date of birth<input id="d-dob" type="date" autocomplete="bday"></label>
+      </div>
+      <label class="f">Email<input id="d-email" type="email" autocomplete="email" maxlength="120"></label>
+      <label class="f">Home address<input id="d-address" autocomplete="street-address" maxlength="200"></label>
+      <div class="row">
+        <label class="f">Emergency contact<input id="d-em-name" maxlength="80" placeholder="Name (relationship)"></label>
+        <label class="f">Their phone<input id="d-em-phone" type="tel" maxlength="20"></label>
+      </div>
+      <label class="f">Insurance plan<select id="d-insurer"><option value="">Choose…</option><option>Self-pay</option><option>Sun Life</option><option>Manulife</option><option>Canada Life</option><option>Green Shield</option><option>Blue Cross</option><option>Desjardins</option></select></label>
+      <div class="row">
+        <label class="f">Plan contract number<input id="d-policy" maxlength="40" autocomplete="off"></label>
+        <label class="f">Member certificate number<input id="d-member" maxlength="40" autocomplete="off"></label>
+      </div>
+      <label class="f">You are the plan member's<select id="d-rel"><option value="">Choose…</option><option value="self">Self (it is my plan)</option><option value="spouse">Spouse</option><option value="dependant">Dependant</option></select></label>
+    </section>
+
+    <section class="card" id="sec-intake" hidden>
+      <h2>Before your first visit</h2>
+      <label class="f">What brings you in?<span class="hint">In your own words.</span><textarea id="i-reason" maxlength="4000"></textarea></label>
+      <label class="f">When did it start?<input id="i-onset" maxlength="200" placeholder="e.g. about three weeks ago, after moving house"></label>
+      <label class="f">Health conditions we should know about<textarea id="i-conditions" maxlength="4000"></textarea></label>
+      <label class="f">Medications you take<textarea id="i-meds" maxlength="4000"></textarea></label>
+      <fieldset id="flags"><legend>Safety questions</legend></fieldset>
+      <label class="check"><input type="checkbox" id="i-c1"><span>I agree to the assessment and to the hands-on care my practitioner proposes. I can ask questions or stop at any time.</span></label>
+      <label class="check"><input type="checkbox" id="i-c2"><span>I understand the clinic's 24-hour cancellation policy.</span></label>
+      <label class="f">Type your full name as your signature<input id="i-sign" autocomplete="name" maxlength="120"></label>
+    </section>
+
+    <div id="msg" role="alert"></div>
+    <button class="primary" type="submit" id="send">Encrypt and send to the clinic</button>
+  </form>
+  <section id="done" class="card done" hidden>
+    <div class="tick"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M5 12l5 5L20 7"/></svg></div>
+    <h1>Sent securely</h1>
+    <p id="done-text"></p>
+  </section>
+</main>
+<script src="/form.js"></script>
+</body>
+</html>

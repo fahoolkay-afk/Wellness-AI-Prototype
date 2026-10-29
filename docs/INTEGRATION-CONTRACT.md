@@ -411,3 +411,75 @@ Each line is a hole found in v1 and what closes it.
 18. **Retention gaps.** Added rows for processors' copies, bridge-created contacts, consent evidence, contact proposals, unpair, and audit; open decision 8 for patient-volunteered text.
 19. **Email subject.** v1 guarded only the body; the subject now goes through the same guards on both sides.
 20. **Ack before commit.** v1 could ack (and so delete) an event the laptop failed to save. Acks now go only after commit; temporary failures are pulled again.
+
+## 12. v1.2 (2026-10-29): website booking, save-what-they-share registration, sealed patient forms
+
+Owner decisions [R 2026-10-29]: both settings are shown (own clinic with the EHRM as the record; subcontractor inside Jane).
+A new patient may book from the clinic's website. Details and intake reach the laptop **sealed**: encrypted on the patient's
+own device (phone or clinic tablet) with the laptop's public key; the cloud stores only ciphertext it cannot open, and deletes
+it once the laptop has it. The desk registers with whatever the patient shares and completes the rest later (by secure link,
+by message, by phone or in person). Intake questions are the EHRM's current intake until intake v3 is supplied.
+
+### 12.1 Flow F. A new or returning patient books on the clinic website (own-clinic edition, bridge clinics only)
+
+1. **Website -> front desk.** `GET /book/:clinicId` serves the booking page; `POST /public/book/:clinicId` takes exactly:
+   `firstName` (one word, `FIRST_NAME_RE`), `phone` (North American, E.164 after normalising), `service` (`initial` |
+   `treatment` | `followup`), `returning` (boolean), `times` (1 to 3 `{ day: YYYY-MM-DD, from: HH:MM, to: HH:MM }`, clinic
+   local, future, within 60 days), `textConsent` (boolean), `website` (honeypot, must be empty). No last name, no date of
+   birth, no reason for visit, no free text. Rate limits: 5 per address per hour, 2 per phone per day.
+2. **Front desk.** Finds or creates the contact by phone (first name only); if `textConsent` is true records an SMS
+   `service` consent with basis `express`, source `website booking form`, text version `web-text-v1`; adds a staff-visible
+   note to the contact's thread ("Booking request from the website: <service label>, <n> preferred time(s)"); queues
+   `booking.requested` (12.3) with `channel: "web"`. Audit `public.book` with contact id and codes only.
+3. **Laptop.** Pulls it into Requests like any other request, with service, returning and the text-consent fact.
+   Returning: the desk screen lists registered people whose phone matches (the match is done on the laptop, never in the cloud).
+
+### 12.2 Flow G. Sealed patient form (details and intake), on the patient's phone or a clinic tablet
+
+1. **Key.** The laptop makes an ECDH P-256 key pair (one per `formKeyId`, `fk_` + 16), keeps the private key sealed at rest,
+   and sends only the public key: `PUT /bridge/v1/form-key` `{ locationId, keyId, publicKey }` (`publicKey` = base64url of the
+   65-byte uncompressed point). The cloud keeps the current key per clinic. Capability `forms.key`.
+2. **Invite.** Desk action on the laptop ("Send secure link" or "Show code for the clinic tablet"):
+   `POST /bridge/v1/forms` `{ locationId, formRef, firstName, sections, expiresAt }`; `formRef` = `frm_` + 22; `sections` a
+   non-empty subset of `["details", "intake"]`; `expiresAt` at most 14 days ahead. The cloud stores the form row with a
+   **hash** of a fresh 32-byte token and answers (signed) `{ ok, url }`, `url` = `<publicUrl>/f/<token>`. Capability
+   `forms.invite`. `POST /bridge/v1/forms/revoke` `{ locationId, formRef }` ends a link.
+3. **Delivery of the link.** Either a desk-released outbox item (template `forms_link`, Flow B rules: consent for that exact
+   channel, wording guard, link allowed only to the front desk's own `/f/` path) or a QR code on the laptop screen for the
+   clinic tablet. The link text names no condition.
+4. **Patient.** `GET /f/:token` serves a static page (no third-party script, `no-referrer`, `no-store`); `GET /f/:token/meta`
+   returns `{ clinicName, firstName, sections, keyId, publicKey, expiresAt }`. The page encrypts the answers on the device:
+   ephemeral ECDH P-256 with the clinic key, HKDF-SHA-256 (salt = formRef, info = `frontdesk-form-v1`), AES-256-GCM with a
+   fresh 12-byte IV and AAD `formRef|keyId`. `POST /f/:token` takes exactly `{ v: 1, keyId, epk, iv, ct }` (ct at most 48 KB).
+   Single use: a second submit is `410`. Expired: `410`. Rate limit per address.
+5. **Front desk.** Never sees the plaintext (it has no private key). Queues `form.submitted` `{ formRef, sealed: { v, keyId,
+   epk, iv, ct } }`, seals the queue row with the vault as usual, marks the form used, and deletes the queue row on ack.
+   Audit `form.submitted` with form ref and size only.
+6. **Laptop.** Pulls the event (capability `forms.receive`), decrypts, holds the answers to a strict schema (unknown keys
+   refused), and stores a form submission encrypted at rest. **Details** (family name, date of birth, email, address,
+   emergency contact, insurer, plan numbers, relationship) wait for the desk to review and accept field by field. **Intake**
+   (reason, onset, conditions, medications, red flags, consent to assessment, cancellation policy, typed signature) attaches
+   to the person's next booked visit (or to the next visit booked), visible to clinical roles only; a red-flag "yes" holds the
+   visit until the practitioner acknowledges it, as for portal bookings.
+
+### 12.3 Event and body changes
+
+- `booking.requested` adds `service` (`initial` | `treatment` | `followup` | null), `returning` (boolean), `textConsent`
+  (boolean: the patient ticked "you may text me about this booking" on the website; false for every other producer) and
+  channel `web`.
+- New event `form.submitted` `{ formRef, sealed }`; `sealed` is exactly `{ v: 1, keyId, epk, iv, ct }`, base64url, with
+  fixed lengths for `epk` (87) and `iv` (16), `ct` at most 65,536 characters.
+- New laptop capabilities: `forms.key`, `forms.invite`, `forms.receive`.
+
+### 12.4 Save what they share (laptop)
+
+- A person can be registered from a request with first name and phone only; the record lists what is still needed: family
+  name, date of birth, address, emergency contact, insurance, and the intake for the first visit.
+- The desk completes details by phone or in person (`POST /api/patients/:id/details`), or sends the sealed form.
+- The website's text consent becomes the person's SMS consent on the laptop when the desk registers them from that request
+  (method `web`, text version `web-text-v1`).
+
+### 12.5 What never crosses (unchanged, restated)
+
+Readable details or intake never cross and are never stored in the cloud: the cloud holds only the sealed blob until the
+laptop acks it. The website form carries no last name, birth date, reason or free text. The brain never sees any of it.

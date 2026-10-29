@@ -410,7 +410,7 @@ test("bridge: the receptionist files a booking request with code-set phone, chan
 
   const res = await b.pull();
   const e = res.data.events.find((x: any) => x.type === "booking.requested");
-  assert.deepEqual(Object.keys(e).sort(), ["at", "channel", "firstName", "id", "kind", "phone", "phoneVerified", "preferredTimes", "requestRef", "seq", "type"]);
+  assert.deepEqual(Object.keys(e).sort(), ["at", "channel", "firstName", "id", "kind", "phone", "phoneVerified", "preferredTimes", "requestRef", "returning", "seq", "service", "textConsent", "type"]);
   assert.equal(e.phone, "+14165550188");
   assert.equal(e.channel, "whatsapp");
   assert.equal(e.kind, "new");

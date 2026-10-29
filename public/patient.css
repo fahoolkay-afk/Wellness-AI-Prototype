@@ -1,0 +1,59 @@
+/* Patient-facing pages (website booking, secure form). Phone first; light and dark. */
+:root {
+  --bg: #f4f7fb; --surface: #ffffff; --surface-2: #f8fafc; --fg: #0f172a; --muted: #52607a; --line: #dbe3ee; --control: #8592a6;
+  --accent: #155eef; --accent-fg: #ffffff; --accent-soft: #eef4ff; --ok: #047857; --ok-soft: #ecfdf5; --warn: #b45309; --warn-soft: #fffbeb;
+  --danger: #b91c1c; --danger-soft: #fef2f2; --lock: #0f766e; --lock-soft: #effcf9;
+  --font: "Inter var", Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1220; --surface: #111a2b; --surface-2: #16213a; --fg: #e5ebf5; --muted: #9aa8bf; --line: #24324d; --control: #64748b;
+    --accent: #6f9bff; --accent-fg: #0b1220; --accent-soft: #16264a; --ok: #34d399; --ok-soft: #0f2a22; --warn: #fbbf24; --warn-soft: #2a2110;
+    --danger: #f87171; --danger-soft: #2a1414; --lock: #2dd4bf; --lock-soft: #0e2a27; color-scheme: dark;
+  }
+}
+* { box-sizing: border-box }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 400 16px/1.5 var(--font); padding: 24px max(16px, env(safe-area-inset-right, 0px)) 48px max(16px, env(safe-area-inset-left, 0px)) }
+main { max-width: 560px; margin: 0 auto; display: grid; gap: 18px }
+header.clinic { display: grid; gap: 4px }
+header.clinic .name { font-weight: 700; font-size: 20px }
+header.clinic .meta { color: var(--muted); font-size: 14px }
+h1 { margin: 0; font-size: 26px; line-height: 1.2; letter-spacing: -.01em; text-wrap: balance }
+h2 { margin: 0; font-size: 17px }
+p { margin: 0 }
+.muted { color: var(--muted) } .small { font-size: 14px }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 18px; display: grid; gap: 14px }
+.note { border-radius: 12px; padding: 12px 14px; font-size: 14px; display: flex; gap: 10px; align-items: flex-start }
+.note.lock { background: var(--lock-soft); color: var(--fg) } .note.lock b { color: var(--lock) }
+.note.info { background: var(--accent-soft) } .note.warn { background: var(--warn-soft) } .note.err { background: var(--danger-soft); color: var(--danger) }
+.note svg { flex: none; width: 18px; height: 18px; margin-top: 2px }
+label.f { display: grid; gap: 6px; font-weight: 600; font-size: 14px }
+label.f .hint { font-weight: 400; color: var(--muted); font-size: 13px }
+input, select, textarea { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--control); border-radius: 10px; padding: 11px 12px; width: 100%; min-width: 0 }
+textarea { min-height: 84px; resize: vertical }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible, .choice:focus-within { outline: 2px solid var(--accent); outline-offset: 2px }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px } .row3 { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 8px; align-items: end }
+@media (max-width: 420px) { .row { grid-template-columns: 1fr } }
+.choices { display: grid; gap: 8px }
+.choice { display: flex; gap: 12px; align-items: center; border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; cursor: pointer; background: var(--surface-2) }
+.choice input { width: 18px; height: 18px; accent-color: var(--accent); flex: none }
+.choice:has(input:checked) { border-color: var(--accent); background: var(--accent-soft) }
+.choice .sub { display: block; color: var(--muted); font-size: 13px; font-weight: 400 }
+.check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px }
+.check input { width: 18px; height: 18px; margin-top: 2px; accent-color: var(--accent); flex: none }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden }
+.seg label { padding: 9px 16px; cursor: pointer; font-weight: 600; font-size: 14px }
+.seg input { position: absolute; opacity: 0; pointer-events: none }
+.seg label:has(input:checked) { background: var(--accent); color: var(--accent-fg) }
+button.primary { font: 600 16px/1 var(--font); background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 12px; padding: 15px 18px; cursor: pointer; width: 100% }
+button.link { font: 600 14px var(--font); color: var(--accent); background: none; border: 0; padding: 4px 0; cursor: pointer; justify-self: start }
+button[disabled] { opacity: .6; cursor: progress }
+.done { text-align: left; display: grid; gap: 10px }
+.done .tick { width: 44px; height: 44px; border-radius: 50%; background: var(--ok-soft); color: var(--ok); display: grid; place-items: center }
+.hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden }
+fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 10px } legend { font-weight: 600; font-size: 14px; padding: 0; margin-bottom: 6px }
+.yn { display: flex; gap: 8px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 8px 0; font-size: 14px }
+.yn:last-child { border-bottom: 0 }
+.yn .opts { display: flex; gap: 12px; flex: none } .yn .opts label { display: flex; gap: 6px; align-items: center; font-weight: 600 }
+footer { color: var(--muted); font-size: 13px; text-align: center }
+.stack { display: grid; gap: 8px }

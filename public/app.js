@@ -1762,6 +1762,9 @@ function viewSettings() {
         const cur = state.clinic.profile;
         await saveProfile({ ...next, automations: cur.automations, wordingRules: cur.wordingRules, audienceTags: cur.audienceTags, retention: cur.retention, quietHours: cur.quietHours, processorAgreementsRecorded: cur.processorAgreementsRecorded, aiModes: cur.aiModes }, "Saved");
       } }, "Save")))),
+    state.clinic.bridge && h("section", { class: "card" }, h("header", {}, h("h3", {}, "Website booking")), h("div", { class: "body stack" },
+      h("p", { class: "meta" }, "Link your website's \"Book online\" button here. Patients give only their first name, mobile number, the kind of visit and the times that suit them; the request goes to the records system, where the desk confirms a time. Their details and intake come later through a secure link that only the clinic laptop can open."),
+      h("code", { class: "copyable" }, `${location.origin}/book/${state.clinicId}`))),
     h("section", { class: "card" }, h("header", {}, h("h3", {}, "Phone assistant (ElevenLabs)")), h("div", { class: "body stack" },
       h("p", { class: "meta" }, "Create an ElevenLabs agent with this prompt and these tools, connect the clinic's number, and set the two phone webhooks above. Tools authenticate with the x-tool-secret header."),
       voiceBox))));

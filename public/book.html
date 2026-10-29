@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Book a visit</title>
+<link rel="stylesheet" href="/patient.css">
+</head>
+<body>
+<main id="main">
+  <header class="clinic"><span class="name" id="clinic-name">Loading…</span><span class="meta" id="clinic-meta"></span></header>
+  <form id="book" class="card" novalidate hidden>
+    <h1>Request a visit</h1>
+    <p class="muted small">Tell us when suits you. The clinic confirms a time with you; nothing is booked until then.</p>
+    <fieldset>
+      <legend>What kind of visit?</legend>
+      <div class="choices" id="services"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Have you been to this clinic before?</legend>
+      <div class="seg" role="radiogroup" aria-label="Been here before">
+        <label><input type="radio" name="returning" value="no" checked>No, first time</label>
+        <label><input type="radio" name="returning" value="yes">Yes</label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>When suits you? <span class="muted small">(up to three)</span></legend>
+      <div id="times" class="stack"></div>
+      <button type="button" class="link" id="add-time">+ Add another time</button>
+    </fieldset>
+    <div class="row">
+      <label class="f">First name<input id="first" autocomplete="given-name" maxlength="30"></label>
+      <label class="f">Mobile number<input id="phone" type="tel" autocomplete="tel" inputmode="tel" placeholder="416 555 0123" maxlength="20"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="consent"><span id="consent-text"></span></label>
+    <div class="note lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      <span>We only ask for your first name and number here. To finish your details, the clinic sends you a <b>secure link</b>: what you type there is encrypted on your phone and only the clinic's own computer can open it.</span></div>
+    <input class="hp" id="website" name="website" tabindex="-1" autocomplete="off" aria-hidden="true">
+    <div id="msg" role="alert"></div>
+    <button class="primary" type="submit" id="send">Send request</button>
+  </form>
+  <section id="done" class="card done" hidden>
+    <div class="tick"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M5 12l5 5L20 7"/></svg></div>
+    <h1>Request sent</h1>
+    <p id="done-text"></p>
+  </section>
+  <footer id="foot"></footer>
+</main>
+<script src="/book.js"></script>
+</body>
+</html>

@@ -22,7 +22,7 @@ export interface BridgeHooks {
   /** Files a booking request (minimum fields). Phone, channel, kind and verified flag are set by code. */
   fileBookingRequest(args: {
     clinic: Clinic; contact: Contact; conversationId: number; channel: Channel; firstName: string | undefined;
-    preferredTimes: unknown; verified: boolean; actor: string;
+    preferredTimes: unknown; verified: boolean; actor: string; service?: string | null;
   }): { ok: true; requestRef: string } | { ok: false; code: string; message: string };
 }
 

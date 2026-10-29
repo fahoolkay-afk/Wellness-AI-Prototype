@@ -60,6 +60,7 @@ export function createServices(config: Config, overrides: { db?: Db; responder?:
   // Bridge to the clinic's EHRM (docs/INTEGRATION-CONTRACT.md): off for every clinic until paired.
   const bridge = new Bridge(new BridgeStore(db), inbox, consents, audit, events);
   inbox.setBridge(bridge);
+  bridge.setPublicUrl(config.publicUrl);
   maintenance.onRetention((now) => bridge.purge(now));
   return { config, db, events, backends, channels, inbox, automations, voice, accounts, audit, consents, unsubscribe, maintenance, bridge };
 }

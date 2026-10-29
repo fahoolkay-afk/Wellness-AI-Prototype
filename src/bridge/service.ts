@@ -18,7 +18,7 @@ import type { AuditLog } from "../security/audit.ts";
 import { randomToken } from "../security/crypto.ts";
 import { parseLocalDateTime } from "../time.ts";
 import type { Channel, Clinic, Contact } from "../types.ts";
-import { CONSENT_CHANNELS, E164_RE, FIRST_NAME_RE, NAME_RE, REF, type DeliveryCode } from "./events.ts";
+import { CONSENT_CHANNELS, E164_RE, FIRST_NAME_RE, NAME_RE, REF, SERVICE_CODES, sealedProblem, type DeliveryCode } from "./events.ts";
 import { PASSED_TO_CLINIC, registerBridge, type BridgeHooks, type ReplyIntent, type WithdrawVia } from "./hooks.ts";
 import type { BridgeStore } from "./store.ts";
 
@@ -44,6 +44,15 @@ const MAX_REQUESTS_PER_CLINIC_HOUR = 30;
 const PRIVATE_HOST = /(^|[^\w.-])(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|\[?::1\]?|[\w-]+\.(local|lan|internal|home\.arpa))(?![\w-])/i;
 const URL_RE = /\b(?:https?:\/\/[^\s<>"]+|www\.[^\s<>"]+|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/[^\s<>"]*)/gi;
 
+/** v1.2 website booking (contract 12.1). The words the patient ticks, kept with its version as consent evidence. */
+export const WEB_TEXT_CONSENT_VERSION = "web-text-v1";
+export const WEB_TEXT_CONSENT = "Yes, the clinic may text me at this number about this booking request, including a secure link to finish my details. I can reply STOP at any time.";
+export const SERVICE_LABEL: Record<(typeof SERVICE_CODES)[number], string> = { initial: "First visit (assessment)", treatment: "Treatment visit", followup: "Short follow-up" };
+const FORM_SECTIONS = ["details", "intake"] as const;
+const WEB_PER_PHONE_DAY = 2;
+/** The front desk's own public address: the only host a released message may link to besides the clinic's site, and only to /f/. */
+let formLinkBase: URL | undefined;
+
 export class Bridge implements BridgeHooks {
   readonly store: BridgeStore;
   private readonly db: Db;
@@ -65,6 +74,15 @@ export class Bridge implements BridgeHooks {
 
   enabled(clinicId: number): boolean {
     return this.store.enabled(clinicId);
+  }
+
+  /** The address patients reach the front desk at (config.publicUrl); form links are built on it. */
+  setPublicUrl(url: string): void {
+    try {
+      formLinkBase = new URL(url);
+    } catch {
+      formLinkBase = undefined;
+    }
   }
 
   start(intervalMs: number): void {
@@ -110,10 +128,110 @@ export class Bridge implements BridgeHooks {
       return refuse("rate_capped", "A request is already with the clinic. Tell the patient the clinic will confirm a time, or hand off to staff.");
     }
     const requestRef = `brq_${randomToken(16).slice(0, 22)}`;
+    const service = args.service && (SERVICE_CODES as readonly string[]).includes(args.service) ? args.service : null;
     this.queue(clinic.id, "booking.requested", {
       requestRef, kind: "new", channel: channel === "voice" ? "voice" : channel, firstName, phone, phoneVerified: args.verified, preferredTimes: times,
+      service, returning: false, textConsent: false,
     }, `conversation:${conversationId}`, source, args.actor.startsWith("staff:") ? "staff" : "receptionist");
     return { ok: true, requestRef };
+  }
+
+  // ------------------------------------------------------------------ website booking (v1.2, contract 12.1)
+
+  /**
+   * A booking request from the clinic's own website. Only first name, phone, service code, returning, up to three
+   * preferred times and the text-consent tick are accepted: no last name, birth date, reason or free text.
+   */
+  bookFromWebsite(clinic: Clinic, body: unknown): { ok: true } | { ok: false; status: number; code: string; message: string } {
+    const refuse = (code: string, message: string, status = 400) => ({ ok: false as const, status, code, message });
+    if (!this.enabled(clinic.id)) return refuse("not_found", "Online booking is not available for this clinic.", 404);
+    if (!body || typeof body !== "object" || Array.isArray(body)) return refuse("bad_request", "Please fill in the form.");
+    const b = body as Record<string, unknown>;
+    const allowed = ["firstName", "phone", "service", "returning", "times", "textConsent", "website"];
+    if (Object.keys(b).some((k) => !allowed.includes(k))) return refuse("bad_request", "Please fill in the form.");
+    if (typeof b.website === "string" && b.website.trim()) return refuse("bad_request", "Please fill in the form."); // honeypot
+    const firstName = String(b.firstName ?? "").trim();
+    if (!FIRST_NAME_RE.test(firstName) || wordingProblems(firstName, DEFAULT_WORDING_RULES).length) return refuse("first_name", "Please enter your first name (letters only, one word).");
+    const phone = normalizePhone(String(b.phone ?? ""));
+    if (!/^\+1[2-9]\d{2}[2-9]\d{6}$/.test(phone)) return refuse("phone", "Please enter a Canadian or US mobile number, with the area code.");
+    if (!(SERVICE_CODES as readonly string[]).includes(String(b.service))) return refuse("service", "Please choose the kind of visit.");
+    if (typeof b.returning !== "boolean" || typeof b.textConsent !== "boolean") return refuse("bad_request", "Please fill in the form.");
+    const rawTimes = Array.isArray(b.times) ? b.times : [];
+    const shaped = rawTimes.map((t) => {
+      const o = (t ?? {}) as Record<string, unknown>;
+      const ok = Object.keys(o).every((k) => ["day", "from", "to"].includes(k)) && /^\d{4}-\d{2}-\d{2}$/.test(String(o.day)) && /^\d{2}:\d{2}$/.test(String(o.from)) && /^\d{2}:\d{2}$/.test(String(o.to));
+      return ok ? { start: `${o.day}T${o.from}`, end: `${o.day}T${o.to}` } : null;
+    });
+    if (shaped.some((t) => !t)) return refuse("times", "Please pick a day and a time range for each choice.");
+    const times = parseTimes(shaped, clinic.profile.timezone);
+    if (typeof times === "string") return refuse("times", times);
+    const source = `web:${this.store.addressHash(clinic.id, "sms", phone)}`;
+    if (this.store.queuedSince(clinic.id, "booking.requested", new Date(Date.now() - 24 * HOUR).toISOString(), source) >= WEB_PER_PHONE_DAY
+      || this.store.queuedSince(clinic.id, "booking.requested", new Date(Date.now() - HOUR).toISOString()) >= MAX_REQUESTS_PER_CLINIC_HOUR) {
+      return refuse("rate_capped", `Your request is already with the clinic. If you need to change it, call ${clinic.profile.phone || "the clinic"}.`, 429);
+    }
+    const { contact } = this.inbox.findOrCreateContact(clinic, "sms", phone, firstName);
+    if (b.textConsent === true) {
+      this.consents.record({ clinicId: clinic.id, contactId: contact.id, channel: "sms", purpose: "service", status: "granted", basis: "express", source: "website booking form", textVersion: WEB_TEXT_CONSENT_VERSION, by: "patient" });
+    }
+    const service = b.service as (typeof SERVICE_CODES)[number];
+    const conversation = this.db.conversationForContact(contact, "sms");
+    // A note for staff in the person's thread. Not a patient message: it opens no reply window and counts toward no limit.
+    this.db.addMessage({
+      conversationId: conversation.id, channel: "sms", direction: "out", author: "system", status: "received",
+      body: `Booking request from the website: ${SERVICE_LABEL[service]}, ${times.length} preferred time${times.length === 1 ? "" : "s"}${b.returning ? ", says they have been before" : ""}. Sent to the records system; the clinic confirms a time.${b.textConsent ? "" : " They did not agree to texts: call them."}`,
+    });
+    const requestRef = `brq_${randomToken(16).slice(0, 22)}`;
+    this.queue(clinic.id, "booking.requested", {
+      requestRef, kind: "new", channel: "web", firstName, phone, phoneVerified: false, preferredTimes: times, service, returning: b.returning, textConsent: b.textConsent,
+    }, `contact:${contact.id}`, source, "website");
+    this.audit.record({ actorType: "webhook", actor: "website", clinicId: clinic.id, action: "public.book", target: `contact:${contact.id}`, contactId: contact.id, outcome: "ok", detail: `service=${service} times=${times.length} returning=${b.returning} text_consent=${b.textConsent}` });
+    this.events.emit("changed", { clinicId: clinic.id, kind: "conversation", id: conversation.id });
+    return { ok: true };
+  }
+
+  // ------------------------------------------------------------------ sealed patient forms (v1.2, contract 12.2)
+
+  setFormKey(clinicId: number, keyId: string, publicKey: string): void {
+    this.store.setFormKey(clinicId, keyId, publicKey);
+  }
+
+  /** Makes a one-time link for a form the laptop asked for. The token is returned once (to the laptop) and kept only as a hash. */
+  createForm(clinicId: number, f: { formRef: string; firstName: string; sections: string[]; expiresAt: string }): { url: string } | { code: string } {
+    if (!formLinkBase) return { code: "no_public_url" };
+    if (!this.store.formKey(clinicId)) return { code: "no_form_key" };
+    const token = randomToken(32);
+    if (!this.store.addForm(clinicId, { ...f, token })) return { code: "duplicate" };
+    return { url: new URL(`/f/${token}`, formLinkBase).toString() };
+  }
+
+  revokeForm(clinicId: number, formRef: string): boolean {
+    return this.store.revokeForm(clinicId, formRef);
+  }
+
+  /** What the patient's page needs to encrypt: the clinic's name and public key, the first name and the sections. */
+  formMeta(token: string): { status: 200; meta: Record<string, unknown> } | { status: 404 | 410; code: string } {
+    const form = /^[A-Za-z0-9_-]{30,64}$/.test(token) ? this.store.formByToken(token) : undefined;
+    if (!form || !this.enabled(form.clinic_id)) return { status: 404, code: "not_found" };
+    if (form.used_at || form.revoked_at || Date.parse(form.expires_at) <= Date.now()) return { status: 410, code: form.used_at ? "used" : "expired" };
+    const key = this.store.formKey(form.clinic_id);
+    const clinic = this.db.getClinic(form.clinic_id);
+    if (!key || !clinic) return { status: 404, code: "not_found" };
+    return { status: 200, meta: { clinicName: clinic.profile.name || clinic.name, firstName: form.first_name, sections: form.sections, formRef: form.form_ref, keyId: key.key_id, publicKey: key.public_key, expiresAt: form.expires_at } };
+  }
+
+  /** Takes the sealed answers. The front desk cannot open them; it only checks the shape, uses the link once and queues them. */
+  submitForm(token: string, body: unknown): { status: 200 } | { status: 400 | 404 | 410; code: string } {
+    const form = /^[A-Za-z0-9_-]{30,64}$/.test(token) ? this.store.formByToken(token) : undefined;
+    if (!form || !this.enabled(form.clinic_id)) return { status: 404, code: "not_found" };
+    if (form.used_at || form.revoked_at || Date.parse(form.expires_at) <= Date.now()) return { status: 410, code: form.used_at ? "used" : "expired" };
+    if (sealedProblem(body)) return { status: 400, code: "bad_value" };
+    const sealed = body as { v: 1; keyId: string; epk: string; iv: string; ct: string };
+    if (sealed.keyId !== this.store.formKey(form.clinic_id)?.key_id) return { status: 400, code: "stale_key" };
+    if (!this.store.useForm(form.clinic_id, form.form_ref)) return { status: 410, code: "used" };
+    this.queue(form.clinic_id, "form.submitted", { formRef: form.form_ref, sealed: { v: 1, keyId: sealed.keyId, epk: sealed.epk, iv: sealed.iv, ct: sealed.ct } }, `form:${form.form_ref}`, `form:${form.form_ref}`, "patient-form");
+    this.audit.record({ actorType: "webhook", actor: "patient-form", clinicId: form.clinic_id, action: "form.submitted", target: `form:${form.form_ref}`, outcome: "ok", detail: `bytes=${sealed.ct.length}` });
+    return { status: 200 };
   }
 
   replyKeyword(clinic: Clinic, contact: Contact, channel: Channel, address: string, intent: ReplyIntent): "queued" | "no_match" {
@@ -373,6 +491,11 @@ function problemCode(problem: string): DeliveryCode {
 
 /** Links only to the clinic's own hosts; never the laptop's /x/ exercise links, loopback or private networks. */
 export function linkProblem(clinic: Clinic, text: string): boolean {
+  // The front desk's own one-time form links (<publicUrl>/f/<token>) are allowed, exactly that origin and path, nothing else on it.
+  if (formLinkBase) {
+    const origin = formLinkBase.origin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    text = text.replace(new RegExp(`${origin}/f/[A-Za-z0-9_-]{30,64}(?![\\w/?#-])`, "g"), " ");
+  }
   if (/\/x\//i.test(text) || PRIVATE_HOST.test(text)) return true;
   const allowed = new Set([clinic.profile.website, clinic.profile.reviewUrl].filter(Boolean).map((u) => {
     try {

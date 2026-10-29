@@ -24,7 +24,7 @@ export function securityHeaders(opts: { https: boolean }) {
     res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
     res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     if (opts.https) res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-    if (req.path.startsWith("/api/") || req.path.startsWith("/u/")) res.setHeader("Cache-Control", "no-store");
+    if (/^\/(api|u|f|public|book)\//.test(req.path)) res.setHeader("Cache-Control", "no-store");
     next();
   };
 }

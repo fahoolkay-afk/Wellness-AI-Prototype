@@ -4,7 +4,7 @@
 // None of these tables is read by the automations, campaigns or the EHR client.
 
 import type { Db } from "../db.ts";
-import { hmac, randomToken } from "../security/crypto.ts";
+import { hmac, randomToken, sha256 } from "../security/crypto.ts";
 import type { Channel } from "../types.ts";
 import type { BridgeEvent, EventType } from "./events.ts";
 
@@ -36,6 +36,15 @@ CREATE TABLE IF NOT EXISTS bridge_deliveries (
   purpose TEXT NOT NULL, address_hash TEXT NOT NULL, appointment_ref TEXT, evidence TEXT NOT NULL,
   result TEXT NOT NULL, code TEXT, status TEXT, pending TEXT, created_at TEXT NOT NULL,
   PRIMARY KEY (clinic_id, release_ref)
+);
+-- v1.2 sealed patient forms. The laptop's public key only (the private key never leaves the laptop). A form row holds a
+-- keyed hash of the link token, never the token; the first name is sealed. Rows go 14 days after they expire or are used.
+CREATE TABLE IF NOT EXISTS bridge_form_keys (
+  clinic_id INTEGER PRIMARY KEY, key_id TEXT NOT NULL, public_key TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bridge_forms (
+  clinic_id INTEGER NOT NULL, form_ref TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, first_name TEXT NOT NULL, sections TEXT NOT NULL,
+  expires_at TEXT NOT NULL, used_at TEXT, revoked_at TEXT, created_at TEXT NOT NULL, PRIMARY KEY (clinic_id, form_ref)
 );
 CREATE INDEX IF NOT EXISTS bridge_deliveries_match ON bridge_deliveries(clinic_id, channel, address_hash, created_at);
 CREATE INDEX IF NOT EXISTS bridge_deliveries_message ON bridge_deliveries(message_id);
@@ -97,7 +106,7 @@ export class BridgeStore {
     return this.db.transaction(() => {
       this.run("UPDATE clinic_integrations SET bridge_key_id = NULL, bridge_secret = NULL, bridge_enabled = 0 WHERE clinic_id = ?", clinicId);
       const out: Record<string, number> = {};
-      for (const t of ["bridge_appointments", "bridge_queue", "bridge_nonces", "bridge_claims", "bridge_deliveries"]) {
+      for (const t of ["bridge_appointments", "bridge_queue", "bridge_nonces", "bridge_claims", "bridge_deliveries", "bridge_form_keys", "bridge_forms"]) {
         out[t.replace("bridge_", "")] = Number(this.run(`DELETE FROM ${t} WHERE clinic_id = ?`, clinicId).changes);
       }
       return out;
@@ -302,7 +311,52 @@ export class BridgeStore {
     this.run("UPDATE bridge_deliveries SET pending = NULL WHERE pending IS NOT NULL AND created_at < ?", iso(2 * 864e5));
     for (const r of this.all<{ clinic_id: number; n: number }>("SELECT clinic_id, COUNT(*) n FROM contact_proposals WHERE source = 'bridge' AND status = 'pending' AND created_at < ? GROUP BY clinic_id", iso(30 * 864e5))) bump(r.clinic_id, "proposals", r.n);
     this.run("DELETE FROM contact_proposals WHERE source = 'bridge' AND status = 'pending' AND created_at < ?", iso(30 * 864e5));
+    for (const r of this.all<{ clinic_id: number; n: number }>("SELECT clinic_id, COUNT(*) n FROM bridge_forms WHERE expires_at < ? OR used_at < ? OR revoked_at < ? GROUP BY clinic_id", iso(14 * 864e5), iso(14 * 864e5), iso(14 * 864e5))) bump(r.clinic_id, "forms", r.n);
+    this.run("DELETE FROM bridge_forms WHERE expires_at < ? OR used_at < ? OR revoked_at < ?", iso(14 * 864e5), iso(14 * 864e5), iso(14 * 864e5));
     return out;
+  }
+
+  // ---- sealed patient forms (v1.2) -------------------------------------------------
+
+  setFormKey(clinicId: number, keyId: string, publicKey: string): void {
+    this.run(`INSERT INTO bridge_form_keys (clinic_id, key_id, public_key, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(clinic_id) DO UPDATE SET key_id = excluded.key_id, public_key = excluded.public_key, updated_at = excluded.updated_at`, clinicId, keyId, publicKey, now());
+  }
+
+  formKey(clinicId: number): { key_id: string; public_key: string } | undefined {
+    return this.get("SELECT key_id, public_key FROM bridge_form_keys WHERE clinic_id = ?", clinicId);
+  }
+
+  /** The token is 32 random bytes, so a plain hash is enough to find the row without keeping the token. */
+  tokenHash(token: string): string {
+    return sha256(`bridge-form-token:${token}`);
+  }
+
+  addForm(clinicId: number, f: { formRef: string; token: string; firstName: string; sections: string[]; expiresAt: string }): boolean {
+    const r = this.run(
+      "INSERT OR IGNORE INTO bridge_forms (clinic_id, form_ref, token_hash, first_name, sections, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      clinicId, f.formRef, this.tokenHash(f.token), this.db.vault.seal(clinicId, `bridge-form:${clinicId}:${f.formRef}`, f.firstName)!, f.sections.join(","), f.expiresAt, now());
+    return Number(r.changes) === 1;
+  }
+
+  revokeForm(clinicId: number, formRef: string): boolean {
+    return Number(this.run("UPDATE bridge_forms SET revoked_at = ? WHERE clinic_id = ? AND form_ref = ? AND revoked_at IS NULL", now(), clinicId, formRef).changes) === 1;
+  }
+
+  formByToken(token: string): { clinic_id: number; form_ref: string; first_name: string; sections: string[]; expires_at: string; used_at: string | null; revoked_at: string | null } | undefined {
+    const row = this.get<{ clinic_id: number; form_ref: string; first_name: string; sections: string; expires_at: string; used_at: string | null; revoked_at: string | null }>(
+      "SELECT clinic_id, form_ref, first_name, sections, expires_at, used_at, revoked_at FROM bridge_forms WHERE token_hash = ?", this.tokenHash(token));
+    if (!row) return undefined;
+    try {
+      return { ...row, first_name: this.db.vault.openStrict(row.clinic_id, `bridge-form:${row.clinic_id}:${row.form_ref}`, row.first_name), sections: row.sections.split(",") };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Marks a form used. Only one submit ever wins. */
+  useForm(clinicId: number, formRef: string): boolean {
+    return Number(this.run("UPDATE bridge_forms SET used_at = ? WHERE clinic_id = ? AND form_ref = ? AND used_at IS NULL AND revoked_at IS NULL", now(), clinicId, formRef).changes) === 1;
   }
 
   /** Delivery rows (and their consent evidence) live as long as the message they belong to. */
