@@ -238,7 +238,7 @@ async function attempt(fn, success) {
     if (success) toast(success);
     return result;
   } catch (err) {
-    if (!(err instanceof SignedOut)) toast(err.message, { error: true });
+    if (!(err instanceof SignedOut)) toast(String(err.message ?? "").replace(/^[a-z_]+: /, ""), { error: true }); // a server code prefix ("use_ehrm_release: ...") is for logs and tests, not staff
     return undefined;
   }
 }
@@ -818,7 +818,7 @@ function viewInbox() {
         const msg = await attempt(() => api("POST", `/conversations/${state.convId}/reply`, { body, channel: channel.value, subject: subject.value || undefined, keepAiOn: keepAi }));
         if (msg) {
           text.value = ""; subject.value = ""; grow();
-          if (msg.status === "failed") toast(`Not delivered: ${msg.error}`, { error: true });
+          if (msg.status === "failed") toast(`Not delivered: ${String(msg.error ?? "").replace(/^[a-z_]+: /, "")}`, { error: true });
           loadThread(true); loadList();
         }
       });
