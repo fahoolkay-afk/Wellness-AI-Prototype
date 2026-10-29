@@ -48,7 +48,8 @@ export class Automations {
 
   private async fireEvent(clinicId: number, type: Automation["trigger"]["type"], subject: string, contact: Contact, appt?: Appointment, tag?: string): Promise<void> {
     const clinic = this.db.getClinic(clinicId);
-    if (!clinic) return;
+    // Bridge mode: the EHRM owns reminders and outreach, so this clinic's cloud automations stay off.
+    if (!clinic || this.inbox.bridgeMode(clinic.id)) return;
     for (const automation of clinic.profile.automations) {
       if (!automation.enabled || automation.trigger.type !== type) continue;
       if (automation.trigger.type === "tag_added" && automation.trigger.tag !== tag) continue;
@@ -78,7 +79,7 @@ export class Automations {
     const t = now.getTime();
     const iso = (ms: number) => new Date(ms).toISOString();
     for (const clinic of this.db.listClinics()) {
-      if (inQuietHours(clinic, now)) continue;
+      if (inQuietHours(clinic, now) || this.inbox.bridgeMode(clinic.id)) continue;
       await this.releaseDeferred(clinic);
       for (const automation of clinic.profile.automations) {
         if (!automation.enabled) continue;
@@ -198,6 +199,7 @@ export class Automations {
   async broadcast(clinic: Clinic, opts: CampaignOptions, staff: { id: number; name: string }): Promise<{ sent: number; skipped: number }> {
     const problem = campaignProblem(clinic, opts);
     if (problem) throw new Error(problem);
+    if (this.inbox.bridgeMode(clinic.id)) throw new Error("use_ehrm_release: campaigns are off for this clinic; outreach is released one by one in the EHRM.");
     if (inQuietHours(clinic, new Date())) throw new Error("It's quiet hours for this clinic. Schedule the campaign for the daytime.");
     const contacts = this.db.listContacts(clinic.id, { tag: opts.tag, stage: opts.stage });
     let sent = 0;

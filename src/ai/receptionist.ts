@@ -2,7 +2,8 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { Config } from "../config.ts";
 import type { Message } from "../types.ts";
 import { staticSystemPrompt, turnContext } from "./prompt.ts";
-import { runTool, TOOL_DEFINITIONS, type ToolContext } from "./tools.ts";
+import { bridgeFor } from "../bridge/hooks.ts";
+import { BRIDGE_TURN_NOTE, runTool, toolDefinitionsFor, type ToolContext } from "./tools.ts";
 
 export interface Reply {
   /** Text to send to the patient, or null when there is nothing to say. */
@@ -75,7 +76,9 @@ export class ClaudeResponder implements Responder {
     const system: Anthropic.Beta.BetaTextBlockParam[] = [
       { type: "text", text: staticSystemPrompt(ctx.clinic), cache_control: { type: "ephemeral" } },
       { type: "text", text: turnContext(ctx.clinic, ctx.contact, ctx.channel, ctx.identityVerified || (!!ctx.verificationScope && ctx.db.isVerified(ctx.contact.id, ctx.verificationScope))) },
+      ...(bridgeFor(ctx.db, ctx.clinic.id) ? [{ type: "text" as const, text: BRIDGE_TURN_NOTE }] : []),
     ];
+    const tools = toolDefinitionsFor(ctx);
     const toolsUsed: string[] = [];
     let handedOff = false;
 
@@ -85,7 +88,7 @@ export class ClaudeResponder implements Responder {
         // Short chat replies; a hard cap also limits the cost of abusive or very long inputs.
         max_tokens: 4096,
         system,
-        tools: TOOL_DEFINITIONS,
+        tools,
         messages,
         output_config: { effort: this.config.effort },
         // If the model declines for policy reasons, retry on Anthropic's recommended fallback model.

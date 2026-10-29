@@ -18,6 +18,7 @@ import type { Consents } from "../consent.ts";
 import type { AuditLog } from "../security/audit.ts";
 import { clinicKnowledge } from "../ai/prompt.ts";
 import { runTool, TOOL_DEFINITIONS, type ToolOutcome } from "../ai/tools.ts";
+import { bridgeFor } from "../bridge/hooks.ts";
 import type { Clinic } from "../types.ts";
 import { formatLocal, localDate } from "../time.ts";
 
@@ -125,7 +126,12 @@ export class Voice {
     const transcript = (data.transcript ?? [])
       .filter((t) => t.message)
       .map((t) => `${t.role === "agent" ? "Receptionist" : "Caller"}: ${t.message}`).join("\n");
-    const summary = data.analysis?.transcript_summary ?? "Call completed.";
+    // A clinic connected to its records system keeps no clinical detail in the cloud (PHIPA s.30): the summary is
+    // only the administrative outcome. The transcript stays encrypted and is cleared on the call retention period.
+    const bridged = !!bridgeFor(this.db, clinic.id);
+    const summary = bridged
+      ? `Call handled by the phone assistant (${data.analysis?.call_successful === "success" ? "completed" : "needs follow-up"}). Any booking or call-back request went to the records system.`
+      : data.analysis?.transcript_summary ?? "Call completed.";
     const duration = data.metadata?.call_duration_secs ?? null;
     this.db.upsertCall({
       clinic_id: clinic.id, contact_id: contact?.id ?? null, conversation_id: conversation?.id ?? null,
@@ -149,7 +155,11 @@ export class Voice {
 
   /** Agent prompt and server-tool definitions to paste into (or sync with) the ElevenLabs agent. */
   agentConfig(clinic: Clinic, publicUrl: string) {
-    const prompt = `You are the friendly virtual assistant answering the phone for {{clinic_name}}. The current time is {{current_time}}.
+    const bridged = !!bridgeFor(this.db, clinic.id);
+    const bridgeRule = bridged
+      ? "\n\nThis clinic books every visit in its own records system. You can't book, move or cancel. Take a booking or call-back request instead: the caller's first name, the best number and the times that suit them. Don't ask why they want to come in or about their health; the clinic will ask when they call back.\n"
+      : "";
+    const prompt = `You are the friendly virtual assistant answering the phone for {{clinic_name}}. The current time is {{current_time}}.${bridgeRule}
 
 Caller ID can be faked. Do not assume who is calling. You may share open times, book a new visit and take messages for anyone. Before you discuss, cancel or move an existing appointment, use send_verification_code (it goes to the phone or email already on file) and check_verification_code with the code the caller reads back. If they can't verify, take a message for staff.
 

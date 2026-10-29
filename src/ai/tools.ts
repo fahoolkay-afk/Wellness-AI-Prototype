@@ -7,6 +7,7 @@ import { practitionerOf, serviceOf } from "../booking/backend.ts";
 import type { Db } from "../db.ts";
 import { normalizePhone } from "../db.ts";
 import type { Events } from "../events.ts";
+import { bridgeFor, PASSED_TO_CLINIC, type BridgeHooks } from "../bridge/hooks.ts";
 import { sha256 } from "../security/crypto.ts";
 import { randomInt } from "node:crypto";
 import type { Channel, Clinic, Contact, Conversation, TaskType } from "../types.ts";
@@ -140,8 +141,84 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
 ];
 
+/**
+ * Bridge mode (the clinic's EHRM owns the schedule): the receptionist cannot see availability or book. It
+ * files a booking request with first name and up to three preferred times; it never asks for the reason for
+ * the visit, the service type, age, date of birth or insurance. Phone, channel, kind and the verified flag
+ * are set by code from the conversation record, never from tool arguments.
+ */
+export const BRIDGE_TOOL_DEFINITIONS: Anthropic.Tool[] = [
+  {
+    name: "book_appointment",
+    description: "Send the patient's booking request to the clinic, which confirms a time itself. Needs the patient's first name and one to three preferred times. Do not ask why they are coming, which service, their age, date of birth or insurance. Afterwards say: your request is in; the clinic will confirm a time. Never say it is booked.",
+    input_schema: obj({
+      first_name: { type: "string", description: "Patient's first name only." },
+      preferred_times: {
+        type: "array", maxItems: 3, minItems: 1, description: "Clinic-local times, e.g. {start: '2026-11-03T09:00', end: '2026-11-03T12:00'}.",
+        items: { type: "object", properties: { start: { type: "string" }, end: { type: "string" } }, required: ["start", "end"], additionalProperties: false },
+      },
+    }, ["first_name", "preferred_times"]),
+  },
+  {
+    name: "cancel_appointment",
+    description: "Pass the patient's request to cancel their upcoming visit to the clinic. Nothing is cancelled here; the clinic follows up.",
+    input_schema: obj({}),
+  },
+  {
+    name: "reschedule_appointment",
+    description: "Pass the patient's request to change the time of their upcoming visit to the clinic. Nothing is moved here; the clinic follows up.",
+    input_schema: obj({}),
+  },
+  ...TOOL_DEFINITIONS.filter((t) => !["find_available_times", "book_appointment", "get_my_appointments", "cancel_appointment", "reschedule_appointment"].includes(t.name)),
+];
+
+/** Extra per-turn instructions when the clinic's EHRM owns the schedule. */
+export const BRIDGE_TURN_NOTE = "Booking in this clinic: you cannot see open times or book. Ask only for the patient's first name and one to three preferred days and times, then call book_appointment. Tell them: your request is in; the clinic will confirm a time. These rules replace the booking steps above.";
+
+export function toolDefinitionsFor(ctx: Pick<ToolContext, "db" | "clinic">): Anthropic.Tool[] {
+  return bridgeFor(ctx.db, ctx.clinic.id) ? BRIDGE_TOOL_DEFINITIONS : TOOL_DEFINITIONS;
+}
+
+async function runBridgeTool(ctx: ToolContext, bridge: BridgeHooks, name: string, input: Record<string, unknown>): Promise<ToolOutcome | undefined> {
+  switch (name) {
+    case "find_available_times":
+    case "get_my_appointments":
+      return { result: "In this clinic the team confirms times and holds appointment details. Ask for the patient's first name and up to three preferred times, then call book_appointment; for anything about an existing visit, take a message with create_staff_task." };
+    case "book_appointment": {
+      const blocked = staffPaused(ctx) ?? oneChangePerTurn(ctx);
+      if (blocked) return blocked;
+      // Older tool callers (the phone agent) may still send a slot start: it becomes one preferred time.
+      const slot = parseLocalDateTime(str(input.start) ?? "", ctx.clinic.profile.timezone);
+      const preferred = Array.isArray(input.preferred_times) ? input.preferred_times
+        : slot ? [{ start: slot.toISOString(), end: new Date(slot.getTime() + 3600_000).toISOString() }] : [];
+      const out = bridge.fileBookingRequest({
+        clinic: ctx.clinic, contact: ctx.contact, conversationId: ctx.conversation.id, channel: ctx.channel,
+        firstName: str(input.first_name) ?? str(input.patient_name), preferredTimes: preferred, verified: verified(ctx), actor: ctx.actor,
+      });
+      if (!out.ok) return { result: out.message, isError: true };
+      ctx.events.emit("changed", { clinicId: ctx.clinic.id, kind: "conversation", id: ctx.conversation.id });
+      return { result: "Request sent to the clinic. Tell the patient: your request is in; the clinic will confirm a time. Do not say it is booked." };
+    }
+    case "cancel_appointment":
+    case "reschedule_appointment": {
+      const channel: Channel = ctx.channel === "voice" ? "sms" : ctx.channel;
+      const address = channel === "email" ? ctx.contact.email : channel === "whatsapp" ? ctx.contact.whatsapp_id : ctx.contact.phone;
+      const relayed = address ? bridge.replyKeyword(ctx.clinic, ctx.contact, channel, address, name === "cancel_appointment" ? "cancel" : "change") : "no_match";
+      if (relayed === "queued") return { result: `Passed to the clinic. Tell the patient: "${PASSED_TO_CLINIC}" Nothing is cancelled or moved until the clinic confirms.` };
+      return { result: "The request could not be matched to one visit. Take a message for the team with create_staff_task (no health details).", isError: true };
+    }
+    default:
+      return undefined;
+  }
+}
+
 export async function runTool(ctx: ToolContext, name: string, input: Record<string, unknown>): Promise<ToolOutcome> {
   try {
+    const bridge = bridgeFor(ctx.db, ctx.clinic.id);
+    if (bridge) {
+      const handled = await runBridgeTool(ctx, bridge, name, input);
+      if (handled) return handled;
+    }
     switch (name) {
       case "find_available_times": return await findTimes(ctx, input);
       case "book_appointment": return await book(ctx, input);

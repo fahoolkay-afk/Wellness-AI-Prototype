@@ -8,6 +8,7 @@ import { parseEmailInbound } from "./channels/email.ts";
 import { parseMetaWebhook, verifyMetaSignature } from "./channels/meta.ts";
 import { parseTelnyxInbound, parseTwilioInbound, verifyTelnyxSignature, verifyTwilioSignature } from "./channels/sms.ts";
 import { verifyElevenLabsSignature } from "./channels/voice.ts";
+import { bridgeRouter } from "./bridge/routes.ts";
 import { toFhirConsent } from "./consent.ts";
 import { normalizePhone, parseTags } from "./db.ts";
 import {
@@ -84,6 +85,7 @@ export function createApp(s: Services): express.Express {
       const sid = String(req.body?.MessageSid ?? "");
       const status = String(req.body?.MessageStatus ?? "");
       const message = sid ? db.findMessageByExternalId("sms", sid) : undefined;
+      if (message) s.bridge.onSmsStatus(message.id, status);
       if (message && (status === "failed" || status === "undelivered")) {
         db.updateMessage(message.id, { status: "failed", error: `Carrier reported ${status} (${String(req.body?.ErrorCode ?? "no code")})` });
         db.updateConversation(message.conversation_id, { needs_attention: 1, attention_reason: "A text was not delivered" });
@@ -156,6 +158,11 @@ export function createApp(s: Services): express.Express {
     app.post("/webhooks/ehr", json("256kb"), (req, res) => {
       const pairing = db.ehrIntegrationByKeyId(String(req.get("x-ehr-key-id") ?? ""));
       if (!pairing || !verifyEhrSignature(pairing.secret, raw(req), req.get("x-ehr-signature"), req.get("x-ehr-timestamp"))) throw new HttpError(403, "Invalid signature");
+      // A bridge clinic has one door (/bridge/v1). This wider route (last name, email, automations) stays shut for it.
+      if (s.bridge.enabled(pairing.clinicId)) {
+        audit.record({ actorType: "webhook", actor: "ehr", clinicId: pairing.clinicId, action: "ehr.webhook.denied", outcome: "denied", detail: "code=bridge_clinic" });
+        throw new HttpError(403, "This clinic uses the bridge");
+      }
       const event = req.body as { id?: string; type?: string; locationId?: string; appointment?: EhrAppointment; patient?: { id: string; firstName?: string; lastName?: string; phone?: string; email?: string } };
       if (event.locationId !== pairing.locationId) throw new HttpError(403, "locationId does not match this key");
       if (!event.id || !/^[\w.:-]{6,100}$/.test(event.id)) throw new HttpError(400, "Event id required");
@@ -197,6 +204,9 @@ export function createApp(s: Services): express.Express {
     });
   }
 
+  // EHRM bridge: requests started by the clinic laptop, signed with the clinic's own bridge key (no /api session).
+  app.use("/bridge/v1", bridgeRouter({ db, audit, bridge: s.bridge }));
+
   // ---------------------------------------------------- unsubscribe (CASL s.11)
 
   const unsubscribePage = (title: string, body: string) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><link rel="stylesheet" href="/styles.css"></head><body class="plain-page"><main class="plain-card"><h1>${title}</h1>${body}</main></body></html>`;
@@ -212,6 +222,7 @@ export function createApp(s: Services): express.Express {
     if (consents.latest(target.contactId, target.channel, "marketing")?.status !== "withdrawn") {
       consents.record({ clinicId: target.clinicId, contactId: target.contactId, channel: target.channel, purpose: "marketing", status: "withdrawn", basis: "link", source: "unsubscribe link", by: "patient" });
       audit.record({ actorType: "anonymous", actor: "unsubscribe-link", clinicId: target.clinicId, action: "consent.withdraw", target: `${target.channel}:marketing`, contactId: target.contactId, outcome: "ok", ip: ipOf(req) });
+      s.bridge.withdrawn(target.clinicId, target.contactId, target.channel, ["marketing"], "unsubscribe_link", "contact");
     }
     res.type("html").send(unsubscribePage("You're unsubscribed", "<p>You won't receive marketing messages here any more. Appointment reminders are not affected.</p>"));
   });
@@ -490,6 +501,24 @@ export function createApp(s: Services): express.Express {
     res.json(db.getConversation(conversation.id));
   });
 
+  /** Bridge mode: staff file a booking request for the EHRM by hand (first name and preferred times only). */
+  api.post("/conversations/:id/booking-request", (req, res) => {
+    need(res, "inbox.reply");
+    const conversation = conversationOr404(res, req.params.id);
+    if (!s.bridge.enabled(conversation.clinic_id)) throw new HttpError(409, "This clinic is not connected to an EHRM bridge.");
+    const result = s.bridge.fileBookingRequest({
+      clinic: db.getClinic(conversation.clinic_id)!, contact: db.getContact(conversation.contact_id)!, conversationId: conversation.id,
+      channel: conversation.last_channel, firstName: typeof req.body?.firstName === "string" ? req.body.firstName : undefined,
+      preferredTimes: req.body?.preferredTimes, actor: `staff:${sess(res).user.username}`,
+      // Verified only when the channel authenticated the patient's last message (never from what staff type).
+      verified: [...db.listMessages(conversation.id, 50)].reverse().find((m) => m.direction === "in" && m.author === "patient")?.sender_verified === 1,
+    });
+    if (!result.ok) throw new HttpError(400, result.message, { code: result.code });
+    audit.record({ ...actor(req, res), clinicId: conversation.clinic_id, action: "bridge.booking_request", target: `conversation:${conversation.id}`, contactId: conversation.contact_id, outcome: "ok" });
+    changed(conversation.clinic_id, "conversation", conversation.id);
+    res.status(201).json({ ok: true, status: "Request sent to the clinic, waiting for release." });
+  });
+
   const draftOr404 = (res: Response, id: unknown) => {
     const message = db.getMessage(num(id));
     const conversation = message ? db.getConversation(message.conversation_id) : undefined;
@@ -594,6 +623,7 @@ export function createApp(s: Services): express.Express {
     }
     consents.record({ clinicId: contact.clinic_id, contactId: contact.id, channel, purpose, status, basis: status === "granted" ? (purpose === "marketing" ? "express" : "staff") : "staff", source: source || "withdrawn by staff on the patient's request", textVersion: req.body?.textVersion ? String(req.body.textVersion).slice(0, 40) : null, by: sess(res).user.username });
     audit.record({ ...actor(req, res), clinicId: contact.clinic_id, action: status === "granted" ? "consent.grant" : "consent.withdraw", target: `${channel}:${purpose}`, contactId: contact.id, outcome: "ok" });
+    if (status === "withdrawn") s.bridge.withdrawn(contact.clinic_id, contact.id, channel, [purpose], "staff", "contact");
     changed(contact.clinic_id, "contact", contact.id);
     res.json(consents.summary(contact.id));
   });
@@ -664,6 +694,7 @@ export function createApp(s: Services): express.Express {
   api.get("/clinics/:cid/slots", async (req, res) => {
     need(res, "calendar.read");
     const clinic = clinicOr404(res, req.params.cid);
+    if (s.bridge.enabled(clinic.id)) throw new HttpError(409, "Open times for this clinic are in the EHRM.");
     const serviceId = String(req.query.service ?? "");
     if (!serviceOf(clinic, serviceId)) throw new HttpError(400, "Unknown service");
     res.json(await s.backends.forClinic(clinic).findSlots(clinic, {
@@ -675,6 +706,7 @@ export function createApp(s: Services): express.Express {
   api.post("/clinics/:cid/appointments", async (req, res) => {
     need(res, "calendar.write");
     const clinic = clinicOr404(res, req.params.cid);
+    if (s.bridge.enabled(clinic.id)) throw new HttpError(409, "Appointments for this clinic are booked in the EHRM.");
     const contact = db.getContact(num(req.body?.contactId));
     if (!contact || contact.clinic_id !== clinic.id) throw new HttpError(400, "Unknown contact");
     const start = parseLocalDateTime(String(req.body?.start ?? ""), clinic.profile.timezone);
@@ -695,6 +727,7 @@ export function createApp(s: Services): express.Express {
     const appt = db.getAppointment(num(req.params.id));
     ownClinic(res, appt?.clinic_id);
     const clinic = db.getClinic(appt!.clinic_id)!;
+    if (s.bridge.enabled(clinic.id)) throw new HttpError(409, "Appointments for this clinic are changed in the EHRM.");
     const status = String(req.body?.status);
     if (status === "cancelled") {
       const result = await s.backends.forClinic(clinic).cancel(clinic, appt!, typeof req.body?.reason === "string" ? req.body.reason.slice(0, 200) : undefined);
@@ -781,6 +814,7 @@ export function createApp(s: Services): express.Express {
   api.post("/clinics/:cid/campaigns", async (req, res) => {
     need(res, "broadcast.send");
     const clinic = clinicOr404(res, req.params.cid);
+    if (s.bridge.enabled(clinic.id)) throw new HttpError(409, "use_ehrm_release: campaigns are off for this clinic; outreach is released one by one in the EHRM.");
     const opts = campaignOptions(clinic, req.body ?? {});
     const preview = s.automations.preview(clinic, opts);
     if (preview.problem) throw new HttpError(400, preview.problem);

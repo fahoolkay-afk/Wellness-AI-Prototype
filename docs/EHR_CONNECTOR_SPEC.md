@@ -1,5 +1,7 @@
 # EHR Connector Spec (v1)
 
+> **Superseded in part (2026-10-29).** The owner decided the clinic laptop calls out to the cloud and the cloud never connects in. Every endpoint below that the front desk calls on the EHRM (patients, availability, appointments, communications) must not be built or pointed at the laptop, and conversation text is not logged to the chart. The current contract is [`INTEGRATION-CONTRACT.md`](INTEGRATION-CONTRACT.md) (`/bridge/v1`). Only the webhook signing scheme below is still reused.
+
 This is the contract between the **Front Desk** app (inbox + AI receptionist) and an
 EHRM in the **EHR-connected edition** (`EDITION=ehr`). Build these endpoints into the
 EHRM and the front desk will use the EHRM as the source of truth for patients,

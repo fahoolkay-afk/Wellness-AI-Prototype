@@ -1,4 +1,6 @@
 import { Automations } from "./automations.ts";
+import { Bridge } from "./bridge/service.ts";
+import { BridgeStore } from "./bridge/store.ts";
 import { DemoResponder } from "./ai/demo.ts";
 import { ClaudeResponder, type Responder } from "./ai/receptionist.ts";
 import { createBackends, type Backends } from "./booking/index.ts";
@@ -30,6 +32,7 @@ export interface Services {
   consents: Consents;
   unsubscribe: UnsubscribeLinks;
   maintenance: Maintenance;
+  bridge: Bridge;
 }
 
 export function createServices(config: Config, overrides: { db?: Db; responder?: Responder; fetchImpl?: typeof fetch; replyDelayMs?: number } = {}): Services {
@@ -54,5 +57,9 @@ export function createServices(config: Config, overrides: { db?: Db; responder?:
   const automations = new Automations(db, events, inbox);
   const voice = new Voice(db, inbox, backends, events, consents, audit);
   const maintenance = new Maintenance(db, audit, accounts, config.backups.dir);
-  return { config, db, events, backends, channels, inbox, automations, voice, accounts, audit, consents, unsubscribe, maintenance };
+  // Bridge to the clinic's EHRM (docs/INTEGRATION-CONTRACT.md): off for every clinic until paired.
+  const bridge = new Bridge(new BridgeStore(db), inbox, consents, audit, events);
+  inbox.setBridge(bridge);
+  maintenance.onRetention((now) => bridge.purge(now));
+  return { config, db, events, backends, channels, inbox, automations, voice, accounts, audit, consents, unsubscribe, maintenance, bridge };
 }

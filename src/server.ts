@@ -20,6 +20,7 @@ if (!config.demo && !services.accounts.count()) {
   console.log("No staff accounts yet. Create the owner with: npm run cli -- create-user <username> \"<Full name>\" owner <clinicId>");
 }
 services.automations.start(config.scheduler.intervalMs);
+services.bridge.start(config.scheduler.intervalMs);
 
 // Retention every hour; an encrypted backup every 24 hours (and once at start).
 const hourly = setInterval(() => {
@@ -49,6 +50,7 @@ const server = app.listen(config.port, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     services.automations.stop();
+    services.bridge.stop();
     clearInterval(hourly);
     clearInterval(daily);
     server.close(() => process.exit(0));

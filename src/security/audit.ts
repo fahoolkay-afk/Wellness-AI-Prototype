@@ -32,7 +32,8 @@ CREATE TRIGGER IF NOT EXISTS access_events_no_delete BEFORE DELETE ON access_eve
 `;
 
 export interface AuditEntry {
-  actorType: "user" | "ai" | "system" | "webhook" | "anonymous";
+  /** device: a machine credential (the clinic laptop's bridge key), never a person and never a staff session. */
+  actorType: "user" | "ai" | "system" | "webhook" | "anonymous" | "device";
   actor: string;
   role?: string | null;
   clinicId?: number | null;

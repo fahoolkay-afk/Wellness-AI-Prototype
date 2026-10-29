@@ -3,6 +3,8 @@
 //   npm run cli -- create-user <username> "<Full name>" <owner|front_desk|practitioner|auditor> <clinicId>
 //   npm run cli -- reset-user <username>
 //   npm run cli -- pair-ehr <clinicId> <locationId>        (prints the key id + secret for the EHRM, once)
+//   npm run cli -- pair-bridge <clinicId> <locationId>     (EHRM bridge key: shown once; re-pairing kills the old key)
+//   npm run cli -- unpair-bridge <clinicId>               (revokes the bridge key and deletes the clinic's bridge data)
 //   npm run cli -- backup
 //   npm run cli -- restore <file.db.enc> <output.db>      (decrypts; stop the server before swapping files)
 //   npm run cli -- verify-audit
@@ -59,6 +61,24 @@ switch (command) {
     console.log(`Paired. Enter these in the EHRM (shown once):\n  X-EHR-Key-Id: ${keyId}\n  Signing secret: ${secret}`);
     break;
   }
+  case "pair-bridge": {
+    const [clinicId, locationId] = args;
+    if (!Number(clinicId) || !locationId || !/^[\w-]{1,64}$/.test(locationId)) fail("Usage: pair-bridge <clinicId> <locationId>");
+    if (!s.db.getClinic(Number(clinicId))) fail(`No clinic ${clinicId}.`);
+    // Its own key: never the ehr_key_id / ehr_secret, which also open /webhooks/ehr.
+    const { keyId, secret } = s.bridge.store.pair(Number(clinicId), locationId);
+    s.audit.record({ actorType: "system", actor: operator, clinicId: Number(clinicId), action: "bridge.pair", target: `location:${locationId}`, outcome: "ok", detail: `key=${keyId}` });
+    console.log(`Bridge paired and switched on. Enter these in the EHRM bridge settings (shown once):\n  Key id: ${keyId}\n  Signing secret: ${secret}\n  Location id: ${locationId}`);
+    break;
+  }
+  case "unpair-bridge": {
+    const clinicId = Number(args[0]);
+    if (!clinicId) fail("Usage: unpair-bridge <clinicId>");
+    const counts = s.bridge.store.unpair(clinicId);
+    s.audit.record({ actorType: "system", actor: operator, clinicId, action: "bridge.unpair", outcome: "ok", detail: Object.entries(counts).map(([k, v]) => `${k}=${v}`).join(" ") });
+    console.log(`Bridge key revoked; deleted ${Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", ")}.`);
+    break;
+  }
   case "backup":
     console.log(s.maintenance.backup() ?? fail("Set BACKUP_DIR first."));
     break;
@@ -76,5 +96,5 @@ switch (command) {
     process.exit(result.ok ? 0 : 2);
   }
   default:
-    console.log("Commands: create-clinic, create-user, reset-user, pair-ehr, backup, restore, verify-audit");
+    console.log("Commands: create-clinic, create-user, reset-user, pair-ehr, pair-bridge, unpair-bridge, backup, restore, verify-audit");
 }

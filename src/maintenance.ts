@@ -21,12 +21,18 @@ export class Maintenance {
   private readonly backupDir: string;
   lastRun?: string;
   lastBackup?: string;
+  private readonly retentionHooks: ((now: Date) => void)[] = [];
 
   constructor(db: Db, audit: AuditLog, accounts: Accounts, backupDir: string) {
     this.db = db;
     this.audit = audit;
     this.accounts = accounts;
     this.backupDir = backupDir;
+  }
+
+  /** Extra retention work run with every pass (e.g. the EHRM bridge tables). */
+  onRetention(hook: (now: Date) => void): void {
+    this.retentionHooks.push(hook);
   }
 
   runRetention(now = new Date()): { messages: number; calls: number } {
@@ -46,6 +52,7 @@ export class Maintenance {
       calls += out.calls;
     }
     this.accounts.pruneSessions();
+    for (const hook of this.retentionHooks) hook(now);
     this.lastRun = now.toISOString();
     return { messages, calls };
   }

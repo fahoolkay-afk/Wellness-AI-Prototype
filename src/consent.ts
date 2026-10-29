@@ -168,7 +168,8 @@ export function toFhirConsent(row: ConsentRow): Record<string, unknown> {
     dateTime: row.recorded_at,
     policyRule: { coding: [{ system: "urn:frontdesk:consent-basis", code: row.basis }] },
     provision: {
-      type: row.status === "granted" ? "permit" : "deny",
+      // A withdrawn row is the original permission no longer in force (status inactive), not an inactive refusal.
+      type: "permit",
       purpose: [{ system: "urn:frontdesk:purpose", code: row.purpose }],
       action: [{ coding: [{ system: "urn:frontdesk:channel", code: row.channel }] }],
     },

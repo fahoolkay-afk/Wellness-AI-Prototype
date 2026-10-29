@@ -8,6 +8,7 @@ import type { Responder } from "./ai/receptionist.ts";
 import { detectIntent } from "./policy/keywords.ts";
 import { enabledWordingRules, privacyProblems, wordingProblems } from "./policy/guards.ts";
 import type { AuditLog } from "./security/audit.ts";
+import { PASSED_TO_CLINIC, type BridgeHooks } from "./bridge/hooks.ts";
 import { formatLocal } from "./time.ts";
 import type { Channel, Clinic, Contact, Conversation, InboundMessage, Message, MessageAuthor } from "./types.ts";
 
@@ -40,6 +41,8 @@ export class Inbox {
   private readonly pending = new Set<number>();
   /** Clinics already told today that the AI budget ran out (one task per day, not one per message). */
   private readonly budgetWarned = new Set<string>();
+  /** Bridge to the clinic's EHRM (docs/INTEGRATION-CONTRACT.md). Set once at start-up. */
+  private bridge?: BridgeHooks;
 
   constructor(db: Db, channels: Channels, backends: Backends, events: Events, responder: Responder, consents: Consents, audit: AuditLog, config: Config, opts: InboxOptions = {}) {
     this.db = db;
@@ -51,6 +54,15 @@ export class Inbox {
     this.audit = audit;
     this.config = config;
     this.replyDelayMs = opts.replyDelayMs ?? 1500;
+  }
+
+  setBridge(bridge: BridgeHooks): void {
+    this.bridge = bridge;
+  }
+
+  /** Bridge mode: the EHRM owns reminders and outreach; this clinic's cloud only answers patients who wrote first. */
+  bridgeMode(clinicId: number): boolean {
+    return !!this.bridge?.enabled(clinicId);
   }
 
   get responderName(): string {
@@ -89,7 +101,7 @@ export class Inbox {
   /** EHR edition: links the contact to an EHR patient by its channel identity only (best effort). */
   async linkToEhr(clinic: Clinic, contact: Contact): Promise<Contact> {
     const backend = this.backends.forClinic(clinic);
-    if (contact.external_id || !backend.syncContact) return contact;
+    if (contact.external_id || !backend.syncContact || this.bridgeMode(clinic.id)) return contact;
     try {
       await backend.syncContact(clinic, contact);
     } catch (err) {
@@ -121,7 +133,8 @@ export class Inbox {
     if (contact.preferred_channel !== inbound.channel) contact = this.db.updateContact(contact.id, { preferred_channel: inbound.channel });
     this.db.updateConversation(conversation.id, { status: "open" });
     this.audit.record({ actorType: "webhook", actor: inbound.channel, clinicId: clinic.id, action: "message.receive", target: `conversation:${conversation.id}`, contactId: contact.id, outcome: "ok", detail: `${body.length} chars${inbound.simulated ? ", test console" : ""}` });
-    if (!inbound.simulated) {
+    // Bridge mode: message bodies never go to the records system (logCommunication is off).
+    if (!inbound.simulated && !this.bridgeMode(clinic.id)) {
       this.backends.ehr?.logCommunication(clinic, contact, { channel: inbound.channel, direction: "in", body, occurredAt: message.created_at })
         .catch((err) => console.error("[ehr] logCommunication failed:", (err as Error).message));
     }
@@ -157,6 +170,8 @@ export class Inbox {
         // Carriers treat these words as an opt-out and send their own confirmation; we must honour it.
         this.consents.withdraw(clinic.id, contact.id, "sms", `patient texted ${intent.word.toUpperCase()}`, "keyword", "patient");
         this.audit.record({ actorType: "webhook", actor: "sms", clinicId: clinic.id, action: "consent.withdraw", target: "sms", contactId: contact.id, outcome: "ok", detail: "carrier keyword" });
+        // Carrier rule wins; relayed to the EHRM for every patient linked to this number. Never read as "cancel my visit".
+        this.bridge?.withdrawn(clinic.id, contact.id, "sms", ["service", "marketing"], "carrier_stop", "address");
         if (intent.word === "cancel") {
           const next = this.db.contactAppointments(contact.id, true).at(-1);
           const when = next ? ` on ${formatLocal(next.starts_at, clinic.profile.timezone)}` : "";
@@ -181,6 +196,7 @@ export class Inbox {
       case "revoke": {
         this.consents.withdraw(clinic.id, contact.id, inbound.channel, "patient asked to stop", "keyword", "patient");
         this.audit.record({ actorType: "webhook", actor: inbound.channel, clinicId: clinic.id, action: "consent.withdraw", target: inbound.channel, contactId: contact.id, outcome: "ok", detail: "patient request" });
+        this.bridge?.withdrawn(clinic.id, contact.id, inbound.channel, ["service", "marketing"], "keyword", "address");
         note(`Patient asked to stop ${inbound.channel} messages. Recorded; no further automated or campaign messages on this channel.`);
         // One plain confirmation is allowed and expected (CASL / FCC). Bypasses consent because it confirms the withdrawal.
         void this.deliver(clinic, contact, conversation.id, inbound.channel,
@@ -188,6 +204,22 @@ export class Inbox {
           { author: "system", purpose: "reply", bypassConsent: true });
         return true;
       }
+      case "confirm":
+      case "change": {
+        if (!this.bridgeMode(clinic.id)) break;
+        if (inbound.simulated) return false;
+        // The EHRM owns the appointment: relay only on an unambiguous match, and never say "you're confirmed".
+        const relayed = this.bridge!.replyKeyword(clinic, contact, inbound.channel, inbound.from, intent.kind);
+        if (relayed === "queued") {
+          void this.deliver(clinic, contact, conversation.id, inbound.channel, PASSED_TO_CLINIC, { author: "system", purpose: "reply" });
+          return true;
+        }
+        if (intent.kind === "change") return false;
+        this.db.updateConversation(conversation.id, { needs_attention: 1, attention_reason: "Patient replied to confirm, but no single reminder matches: please check with the clinic" });
+        return true;
+      }
+    }
+    switch (intent.kind) {
       case "confirm": {
         const soon = this.db.contactAppointments(contact.id, true).filter((a) => Date.parse(a.starts_at) - Date.now() < 72 * 3600_000).at(-1);
         if (!soon) return false;
@@ -291,7 +323,7 @@ export class Inbox {
    * Failures are recorded on the message and flagged for staff, not thrown (except for staff, see staffReply).
    */
   async deliver(clinic: Clinic, contact: Contact, conversationId: number, channel: Channel, body: string,
-    opts: { author: MessageAuthor; authorName?: string; subject?: string; purpose: SendPurpose; staffUserId?: number; bypassConsent?: boolean; recordAs?: string }): Promise<Message> {
+    opts: { author: MessageAuthor; authorName?: string; subject?: string; purpose: SendPurpose; staffUserId?: number; bypassConsent?: boolean; recordAs?: string; bridgeRelease?: boolean }): Promise<Message> {
     const problem = this.sendProblem(clinic, contact, conversationId, channel, body, opts);
     const message = this.db.addMessage({
       conversationId, channel, direction: "out", author: opts.author, authorName: opts.authorName ?? null,
@@ -305,7 +337,7 @@ export class Inbox {
       try {
         const result = await this.channels.send(clinic, contact, channel, body, { subject: opts.subject, purpose: opts.purpose === "reply" ? "service" : opts.purpose });
         this.db.updateMessage(message.id, { status: result.status, external_id: result.externalId ?? null });
-        this.backends.ehr?.logCommunication(clinic, contact, { channel, direction: "out", body, occurredAt: message.created_at })
+        if (!this.bridgeMode(clinic.id)) this.backends.ehr?.logCommunication(clinic, contact, { channel, direction: "out", body, occurredAt: message.created_at })
           .catch((err) => console.error("[ehr] logCommunication failed:", (err as Error).message));
       } catch (err) {
         const error = err instanceof ChannelError ? err.message : `Send failed: ${(err as Error).message}`;
@@ -319,7 +351,15 @@ export class Inbox {
 
   /** Why a message may not be sent, or undefined when it may. */
   sendProblem(clinic: Clinic, contact: Contact, conversationId: number, channel: Channel, body: string,
-    opts: { purpose: SendPurpose; bypassConsent?: boolean }): string | undefined {
+    opts: { purpose: SendPurpose; bypassConsent?: boolean; bridgeRelease?: boolean }): string | undefined {
+    // Bridge mode: nothing business-initiated leaves the cloud unless a practitioner released it in the EHRM
+    // (bridgeRelease, set only by src/bridge after its own send-time checks). Staff and the receptionist may
+    // only answer a patient who wrote or called in the last 24 hours (Meta channels: that channel's window).
+    if (this.bridge?.enabled(clinic.id) && !opts.bridgeRelease) {
+      if (opts.purpose !== "reply" || !this.bridge.replyAllowed(conversationId, channel)) {
+        return "use_ehrm_release: in this clinic only the EHRM can start a message; a practitioner proposes and releases it there";
+      }
+    }
     if (!opts.bypassConsent) {
       const consent = this.consents.check(contact.id, channel, opts.purpose);
       if (!consent.ok) return consent.reason;
