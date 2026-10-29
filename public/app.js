@@ -430,7 +430,7 @@ let railEl, titleEl, viewEl, liveDot, aiChip;
 
 function renderShell() {
   railEl = h("nav", { class: "rail", "aria-label": "Main" },
-    h("div", { class: "account" }, h("span", { class: "mark" }, icon("shield")), h("div", {}, h("b", {}, state.clinic.name), h("span", {}, state.clinic.edition === "ehr" ? "Connected to records" : "Standalone clinic"))));
+    h("div", { class: "account" }, h("span", { class: "mark" }, icon("shield")), h("div", {}, h("b", {}, state.clinic.name), h("span", {}, state.clinic.bridge ? "Linked to the records system" : state.clinic.edition === "ehr" ? "Connected to records" : "Standalone clinic"))));
   let group = "";
   for (const v of visibleViews()) {
     if (v.group !== group) { group = v.group; railEl.append(h("div", { class: "group" }, group)); }
@@ -707,6 +707,7 @@ function viewInbox() {
       h("button", { class: "btn ghost icon back", "aria-label": "Back to conversations", onclick: () => { layout.classList.remove("open"); state.convId = null; drawList(); } }, icon("back")),
       avatar(name),
       h("div", { class: "who" }, h("b", {}, name), h("span", { class: "row meta" }, reachable.map(chBadge), [contact.phone && fmtAddr(contact.phone), contact.email].filter(Boolean).join(" · "))),
+      state.clinic.bridge && can("inbox.reply") && h("button", { class: "btn sm soft", onclick: () => bookingRequest(conversation, contact) }, icon("calendar"), "Send booking request"),
       h("span", { class: "hide-sm" }, mode),
       h("button", { class: "btn ghost icon panel-toggle", "aria-label": "Patient details", title: "Patient details (.)", onclick: () => layout.classList.toggle("show-side") }, icon("panel")));
     banner.classList.toggle("hidden", !conversation.needs_attention);
@@ -730,7 +731,9 @@ function viewInbox() {
         prev = null;
       }
       if (m.__call) { nodes.push(callCard(m, state.thread.contact)); prev = null; continue; }
-      if (m.author === "system") { nodes.push(h("div", { class: "sysrow" }, h("span", {}, m.body))); prev = null; continue; }
+      // Internal notes are system rows; a message released in the records system is a real outgoing message.
+      const released = m.author === "system" && m.direction === "out" && /^Released in/.test(m.author_name ?? "");
+      if (m.author === "system" && !released) { nodes.push(h("div", { class: "sysrow" }, h("span", {}, m.body))); prev = null; continue; }
       if (m.author === "call") { nodes.push(callRow(m)); prev = null; continue; }
       const next = messages[i + 1];
       const sameAuthor = (a, b) => a && b && a.author === b.author && a.direction === b.direction && a.status !== "draft" && b.status !== "draft" && Math.abs(new Date(a.created_at) - new Date(b.created_at)) < 180_000 && dayKey(b.created_at) === day;
@@ -752,11 +755,13 @@ function viewInbox() {
 
   function bubble(m, first, last) {
     const out = m.direction === "out";
-    const kind = m.author === "ai" ? "ai" : m.author === "staff" ? "staff" : "";
+    const kind = m.author === "ai" ? "ai" : m.author === "staff" || m.author === "system" ? "staff" : "";
     const isNew = !seenIds.has(m.id) && seenIds.size > 0 && !out;
     const status = { sent: [icon("check"), "Sent"], simulated: [icon("check"), "Simulated"], failed: [icon("alert"), "Not delivered"], received: null }[m.status];
     const author = first && (out
-      ? (m.author === "ai" ? h("div", { class: "author" }, icon("sparkle"), "Assistant") : h("div", { class: "author" }, m.author_name ?? "Staff"))
+      ? (m.author === "ai" ? h("div", { class: "author" }, icon("sparkle"), "Assistant")
+        : m.author === "system" ? h("div", { class: "author" }, icon("shield"), m.author_name ?? "")
+        : h("div", { class: "author" }, m.author_name ?? "Staff"))
       : h("div", { class: "author", style: { color: "var(--fg-muted)" } }, state.thread.contact.name ?? "Patient"));
     const t = state.thread;
     const theirs = fmtAddr(contactAddress(t.contact, m.channel));
@@ -836,6 +841,7 @@ function viewInbox() {
       const closing = win && new Date(win) > new Date() && new Date(win) - Date.now() < 4 * 3600_000;
       fill(foot,
         closing && pill(`Window closes in ${duration(new Date(win) - Date.now())}`, "warn"),
+        state.clinic.bridge && h("span", {}, "Reminders and follow-ups are released in the records system."),
         data.conversation.ai_enabled
           ? [h("span", {}, keepAi ? "The assistant stays on after you send." : "Sending pauses the assistant on this conversation."),
             h("button", { class: "link", onclick: () => { keepAi = !keepAi; draw(); } }, keepAi ? "Pause it" : "Keep it on")]
@@ -1058,6 +1064,23 @@ async function eraseContact(contact, onChange) {
     initial: () => input,
   });
   if (ok) { await attempt(() => api("POST", `/contacts/${contact.id}/erase`, { confirm: input.value }), "Messages erased"); onChange(); }
+}
+
+/** Records-linked clinics: hand a booking request to the records system (first name, phone, preferred times only). */
+async function bookingRequest(conversation, contact) {
+  const first = h("input", { value: firstName(contact.name) || "", autocomplete: "off" });
+  const day = h("input", { type: "date", value: new Date(Date.now() + 864e5).toISOString().slice(0, 10) });
+  const from = h("input", { type: "time", value: "09:00" });
+  const to = h("input", { type: "time", value: "12:00" });
+  const ok = await modal({
+    title: "Send a booking request to the clinic",
+    body: [h("div", { class: "banner info" }, icon("shield"), "Only the first name, phone number and preferred times go to the records system. Nothing the patient wrote is sent, and no visit is booked until the clinic books it there."),
+      h("label", { class: "f" }, "First name", first),
+      h("div", { class: "grid2", style: { gap: "12px", gridTemplateColumns: "1fr 1fr 1fr" } }, h("label", { class: "f" }, "Day", day), h("label", { class: "f" }, "From", from), h("label", { class: "f" }, "Until", to))],
+    actions: (close) => [h("button", { class: "btn", onclick: () => close(false) }, "Cancel"), h("button", { class: "btn primary", onclick: () => close(true) }, "Send request")],
+  });
+  if (!ok) return;
+  await attempt(() => api("POST", `/conversations/${conversation.id}/booking-request`, { firstName: first.value.trim(), preferredTimes: [{ start: `${day.value}T${from.value}`, end: `${day.value}T${to.value}` }] }), "Request sent to the clinic");
 }
 
 async function newTask(contact, onChange) {

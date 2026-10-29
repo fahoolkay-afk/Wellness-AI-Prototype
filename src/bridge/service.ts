@@ -311,7 +311,7 @@ export class Bridge implements BridgeHooks {
     }
     record("accepted", null);
     const message = await this.inbox.deliver(clinic, contact, conversation.id, channel, item.text, {
-      ...opts, author: "system", authorName: `Released in the EHRM by ${item.releasedBy}`, subject: item.subject ?? undefined,
+      ...opts, author: "system", authorName: `Released in the records system by ${item.releasedBy}`, subject: item.subject ?? undefined,
     });
     this.store.updateDelivery(clinic.id, item.releaseRef, { messageId: message.id });
     const [status, code]: [string, DeliveryCode | null] = message.status === "sent" ? ["sent", null] : message.status === "simulated" ? ["not_sent", "simulated"] : ["failed", "send_failed"];

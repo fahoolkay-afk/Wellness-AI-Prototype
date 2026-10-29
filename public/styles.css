@@ -459,13 +459,13 @@ kbd { display: inline-grid; place-items: center; min-width: 22px; height: 22px; 
 .plain-card h1 { font-size: 22px; }
 
 /* ---------------------------------------------------------- responsive */
-@media (max-width: 1279px) {
+@media (max-width: 1439px) {
   .inbox { grid-template-columns: var(--list-w) 1fr; }
   .side { position: fixed; z-index: var(--z-drawer); top: 0; right: 0; bottom: 0; width: min(360px, 92vw); box-shadow: var(--elev-3); transform: translateX(16px); opacity: 0; visibility: hidden; transition: transform var(--dur-panel) var(--ease-out), opacity var(--dur-panel) var(--ease-out), visibility 0s linear var(--dur-panel); }
   .inbox.show-side .side { transform: none; opacity: 1; visibility: visible; transition: transform var(--dur-panel) var(--ease-out), opacity var(--dur-panel) var(--ease-out); }
   .side .close { display: inline-flex; }
 }
-@media (min-width: 1280px) { .side .close, .thread-head .panel-toggle { display: none; } }
+@media (min-width: 1440px) { .side .close, .thread-head .panel-toggle { display: none; } }
 @media (min-width: 1600px) { :root { --panel-w: 360px; } }
 @media (max-width: 1023px) {
   :root { --list-w: 300px; }

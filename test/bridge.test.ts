@@ -249,7 +249,7 @@ test("bridge: a released reminder is sent on exactly its channel; the consent fa
   const msg = b.s.db.listMessages(conv.id).at(-1)!;
   assert.equal(msg.body, it.text);
   assert.equal(msg.status, "sent");
-  assert.equal(msg.author_name, "Released in the EHRM by Sam");
+  assert.equal(msg.author_name, "Released in the records system by Sam");
 
   // The same release twice is applied once, and the repeat is told the outcome recorded the first time.
   assert.deepEqual((await b.outbox([it])).data.results[0], { releaseRef: it.releaseRef, result: "accepted", code: null });

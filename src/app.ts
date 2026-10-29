@@ -414,6 +414,8 @@ export function createApp(s: Services): express.Express {
       channels: s.channels.status(), accounts: db.listChannelAccounts(clinic.id), stages: STAGES,
       wordingRules: Object.fromEntries(Object.entries(WORDING_RULES).map(([k, v]) => [k, v.label])),
       ehrPaired: !!db.ehrLocationOf(clinic.id),
+      // Connected to the clinic's records system through the bridge: bookings and outreach are released there.
+      bridge: s.bridge.enabled(clinic.id),
     });
   });
 
