@@ -34,6 +34,13 @@ The editions differ only in which `PracticeBackend` is plugged in (`src/booking/
 The contract the EHRM must implement is in **[docs/EHR_CONNECTOR_SPEC.md](docs/EHR_CONNECTOR_SPEC.md)**,
 and there is a working mock EHR (`npm run ehr:mock`) to build and test against.
 
+## Try it in your browser
+
+`npm run demo:build` packages the real app (server code included) into one HTML file,
+`demo/dist/clinic-front-desk.html`, that runs entirely in the browser on an in-memory
+database with the demo clinic. Nothing is sent anywhere and data resets on reload. It's the
+easiest way to show the product without hosting anything.
+
 ## Quick start (no accounts needed)
 
 Requires Node.js 22.18 or newer (it runs TypeScript directly; no build step).

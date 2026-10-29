@@ -81,21 +81,38 @@ function avatar(name, channel) {
 
 const contactLabel = (c) => c.contact_name ?? c.name ?? c.contact_phone ?? c.phone ?? c.contact_email ?? c.email ?? "Unknown contact";
 
+/** All times show in the clinic's time zone, wherever the staff member's device is. */
+const clinicTz = () => state.clinic?.profile.timezone;
+const fmt = (iso, opts) => new Date(iso).toLocaleString([], { ...opts, timeZone: clinicTz() });
+const dayKey = (iso) => new Intl.DateTimeFormat("en-CA", { timeZone: clinicTz() }).format(new Date(iso));
+const fmtTime = (iso) => fmt(iso, { hour: "numeric", minute: "2-digit" });
+
 function timeShort(iso) {
-  const d = new Date(iso);
-  const today = new Date();
-  if (d.toDateString() === today.toDateString()) return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-  const diff = (today - d) / 864e5;
-  if (diff < 6) return d.toLocaleDateString([], { weekday: "short" });
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+  if (dayKey(iso) === dayKey(new Date())) return fmtTime(iso);
+  if ((Date.now() - new Date(iso)) / 864e5 < 6) return fmt(iso, { weekday: "short" });
+  return fmt(iso, { month: "short", day: "numeric" });
 }
 
-const fmtDateTime = (iso) => new Date(iso).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const fmtDateTime = (iso) => fmt(iso, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
 function toast(text, isError = false) {
   const el = h("div", { class: `toast${isError ? " err" : ""}` }, text);
   document.body.append(el);
   setTimeout(() => el.remove(), isError ? 5000 : 2600);
+}
+
+/** In-page confirmation (embedded viewers block window.confirm). Resolves true if confirmed. */
+function askConfirm(message, confirmLabel = "Confirm") {
+  return new Promise((resolve) => {
+    const close = (answer) => { overlay.remove(); resolve(answer); };
+    const ok = h("button", { class: "btn primary", onclick: () => close(true) }, confirmLabel);
+    const overlay = h("div", { class: "modal", onclick: (e) => { if (e.target === overlay) close(false); }, onkeydown: (e) => { if (e.key === "Escape") close(false); } },
+      h("div", { class: "modal-card", role: "dialog", "aria-modal": "true" },
+        h("p", {}, message),
+        h("div", { class: "row", style: { justifyContent: "flex-end" } }, h("button", { class: "btn", onclick: () => close(false) }, "Go back"), ok)));
+    document.body.append(overlay);
+    ok.focus();
+  });
 }
 
 async function api(method, path, body) {
@@ -170,6 +187,10 @@ const VIEWS = [
   ["tasks", "Tasks"], ["calls", "Calls"], ["automations", "Automations"], ["broadcast", "Broadcast"], ["test", "Test"], ["settings", "Settings"],
 ];
 
+// "#settings" is reserved when the app is embedded, so that view's link is "#setup".
+const hashForView = (view) => (view === "settings" ? "setup" : view);
+const viewForHash = (hash) => (hash === "setup" ? "settings" : hash);
+
 const root = document.getElementById("app");
 
 // -------------------------------------------------------------------- login
@@ -215,7 +236,7 @@ async function boot() {
   await loadClinic();
   renderShell();
   connectLive();
-  const hashView = location.hash.slice(1);
+  const hashView = viewForHash(location.hash.slice(1));
   show(VIEWS.some(([v]) => v === hashView) ? hashView : "inbox");
 }
 
@@ -249,6 +270,7 @@ function renderShell() {
     clinicSelect,
     h("span", { class: "pill", title: "Edition" }, state.clinic.edition === "ehr" ? "EHR-connected" : "Standalone"),
     h("span", { class: "pill ai", title: "AI receptionist engine" }, state.clinic.responder === "claude" ? "AI: Claude" : "AI: demo mode"),
+    window.__FD_DEMO__ ? h("span", { class: "pill warn", title: "Runs entirely in your browser. Nothing is sent, and data resets when you reload." }, "Browser demo") : null,
     liveDot,
     h("span", { class: "muted small" }, state.session.name),
   );
@@ -284,7 +306,7 @@ function refresh(event) {
 
 function show(view) {
   state.view = view;
-  if (location.hash !== `#${view}`) history.replaceState(null, "", `#${view}`);
+  if (location.hash !== `#${hashForView(view)}`) history.replaceState(null, "", `#${hashForView(view)}`);
   for (const b of navEl.querySelectorAll("button[data-view]")) b.classList.toggle("active", b.dataset.view === view);
   titleEl.textContent = VIEWS.find(([v]) => v === view)?.[1] ?? "";
   viewEl.replaceChildren();
@@ -389,9 +411,9 @@ function viewInbox() {
     const nodes = [];
     let lastDay = "";
     for (const m of messages) {
-      const day = new Date(m.created_at).toDateString();
+      const day = dayKey(m.created_at);
       if (day !== lastDay) {
-        nodes.push(h("div", { class: "day-sep" }, new Date(m.created_at).toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" })));
+        nodes.push(h("div", { class: "day-sep" }, fmt(m.created_at, { weekday: "long", month: "short", day: "numeric" })));
         lastDay = day;
       }
       if (m.author === "system") {
@@ -412,7 +434,7 @@ function viewInbox() {
       m.subject && h("div", { class: "subject" }, m.subject),
       m.body,
       m.error && h("div", { class: "err" }, m.error),
-      h("div", { class: "meta" }, chBadge(m.channel), new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), out && status),
+      h("div", { class: "meta" }, chBadge(m.channel), fmtTime(m.created_at), out && status),
     );
   }
 
@@ -432,7 +454,7 @@ function viewInbox() {
         edit,
         h("button", { class: "btn small danger", onclick: async () => { await attempt(() => api("POST", `/messages/${m.id}/discard`)); loadThread(); } }, "Discard"),
       ),
-      h("div", { class: "meta" }, chBadge(m.channel), new Date(m.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })),
+      h("div", { class: "meta" }, chBadge(m.channel), fmtTime(m.created_at)),
     );
   }
 
@@ -529,7 +551,7 @@ function apptCard(a, onChange) {
   const practitioner = state.clinic.profile.practitioners.find((p) => p.id === a.practitioner_id)?.name ?? a.practitioner_id;
   const upcoming = a.status === "booked" && new Date(a.starts_at) > new Date();
   const setStatus = (status) => async () => {
-    if (status === "cancelled" && !confirm("Cancel this appointment? The patient will be notified.")) return;
+    if (status === "cancelled" && !(await askConfirm("Cancel this appointment? The patient will be notified.", "Cancel appointment"))) return;
     await attempt(() => api("POST", `/appointments/${a.id}/status`, { status }), "Updated");
     onChange();
   };
@@ -601,7 +623,7 @@ async function viewDashboard() {
       h("div", { class: "stats" }, tiles.map(([n, l]) => h("div", { class: "stat" }, h("div", { class: "n" }, n), h("div", { class: "l" }, l)))),
       h("div", { class: "grid2" },
         h("div", {}, h("div", { class: "section-title" }, h("h3", {}, "Today's appointments")),
-          appts.length ? appts.map((a) => h("div", { class: `appt ${a.status}` }, h("b", {}, new Date(a.starts_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }), " ", a.contact_name ?? ""),
+          appts.length ? appts.map((a) => h("div", { class: `appt ${a.status}` }, h("b", {}, fmtTime(a.starts_at), " ", a.contact_name ?? ""),
             h("div", {}, state.clinic.profile.services.find((s) => s.id === a.service_id)?.name ?? a.service_id))) : h("p", { class: "muted" }, "Nothing booked today.")),
         h("div", {}, h("div", { class: "section-title" }, h("h3", {}, "Open tasks"), h("button", { class: "btn small", onclick: () => show("tasks") }, "All tasks")),
           tasks.slice(0, 8).map((t) => taskRow(t, draw)), !tasks.length && h("p", { class: "muted" }, "All caught up.")),
@@ -703,7 +725,7 @@ async function viewCalendar() {
     }
     page.replaceChildren(
       h("div", { class: "section-title" },
-        h("h3", {}, `Week of ${new Date(`${start}T12:00:00Z`).toLocaleDateString([], { month: "long", day: "numeric" })}`),
+        h("h3", {}, `Week of ${new Date(`${start}T12:00:00Z`).toLocaleDateString([], { month: "long", day: "numeric", timeZone: "UTC" })}`),
         h("div", { class: "row" },
           h("button", { class: "btn", onclick: () => { start = addDays(start, -7); draw(); } }, "‹ Prev"),
           h("button", { class: "btn", onclick: () => { start = todayLocal; draw(); } }, "Today"),
@@ -833,7 +855,7 @@ function viewBroadcast() {
     h("label", {}, "Email subject"), subject,
     h("label", {}, "Message"), body,
     h("div", { style: { marginTop: "12px" } }, h("button", { class: "btn primary", onclick: async () => {
-      if (!confirm("Send this message now to every matching contact?")) return;
+      if (!(await askConfirm("Send this message now to every matching contact?", "Send broadcast"))) return;
       const r = await attempt(() => api("POST", `/clinics/${state.clinicId}/broadcast`, { name: name.value || "Broadcast", stage: stage.value, tag: tag.value.trim().toLowerCase(), channel: channel.value, subject: subject.value, template: body.value }));
       if (r) result.replaceChildren(h("p", { class: "pill live" }, `Sent to ${r.sent} contacts, skipped ${r.skipped}.`));
     } }, "Send broadcast")),

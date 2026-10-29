@@ -14,11 +14,11 @@ export interface Session {
 }
 
 function sign(secret: string, payload: string): string {
-  return createHmac("sha256", secret).update(payload).digest("base64url");
+  return createHmac("sha256", secret).update(payload).digest("hex");
 }
 
 export function issueSession(secret: string, name: string): string {
-  const payload = Buffer.from(JSON.stringify({ name, exp: Math.floor(Date.now() / 1000) + MAX_AGE_S })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ name, exp: Math.floor(Date.now() / 1000) + MAX_AGE_S })).toString("hex");
   return `${payload}.${sign(secret, payload)}`;
 }
 
@@ -29,7 +29,7 @@ export function readSession(secret: string, token: string | undefined): Session 
   const expected = Buffer.from(sign(secret, payload));
   const given = Buffer.from(sig);
   if (expected.length !== given.length || !timingSafeEqual(expected, given)) return undefined;
-  const session = JSON.parse(Buffer.from(payload, "base64url").toString()) as Session;
+  const session = JSON.parse(Buffer.from(payload, "hex").toString()) as Session;
   return session.exp > Date.now() / 1000 ? session : undefined;
 }
 
