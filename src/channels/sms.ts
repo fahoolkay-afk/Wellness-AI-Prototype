@@ -21,13 +21,17 @@ export async function sendSms(config: Config, from: string, to: string, body: st
     return { status: "sent", externalId: data.data?.id };
   }
   if (!sms.twilioAccountSid || !sms.twilioAuthToken) return { status: "simulated" };
+  // A Messaging Service bound to a registered 10DLC campaign is the compliant way to send in the US.
+  const params = new URLSearchParams({ To: to, Body: body, StatusCallback: `${config.publicUrl.replace(/\/$/, "")}/webhooks/twilio/status` });
+  if (sms.twilioMessagingServiceSid) params.set("MessagingServiceSid", sms.twilioMessagingServiceSid);
+  else params.set("From", from);
   const res = await fetchImpl(`https://api.twilio.com/2010-04-01/Accounts/${sms.twilioAccountSid}/Messages.json`, {
     method: "POST",
     headers: {
       authorization: `Basic ${Buffer.from(`${sms.twilioAccountSid}:${sms.twilioAuthToken}`).toString("base64")}`,
       "content-type": "application/x-www-form-urlencoded",
     },
-    body: new URLSearchParams({ From: from, To: to, Body: body }),
+    body: params,
   });
   const data = (await res.json()) as { sid?: string; message?: string };
   if (!res.ok) throw new Error(`Twilio: ${data.message ?? res.status}`);
@@ -74,15 +78,4 @@ export function parseTelnyxInbound(event: TelnyxEvent): InboundMessage | undefin
     channel: "sms", from: normalizePhone(payload.from.phone_number), to: normalizePhone(payload.to[0].phone_number),
     body: payload.text ?? "", externalId: payload.id,
   };
-}
-
-const STOP_WORDS = new Set(["stop", "stopall", "unsubscribe", "cancel", "end", "quit", "arret", "arrêt"]);
-const START_WORDS = new Set(["start", "unstop"]);
-
-/** Carrier opt-out keywords; only a message consisting of just the keyword counts. */
-export function optOutKeyword(body: string): "stop" | "start" | undefined {
-  const word = body.trim().toLowerCase();
-  if (STOP_WORDS.has(word)) return "stop";
-  if (START_WORDS.has(word)) return "start";
-  return undefined;
 }

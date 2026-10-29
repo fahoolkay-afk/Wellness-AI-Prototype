@@ -80,25 +80,27 @@ export class EhrBackend implements PracticeBackend {
     this.client = client;
   }
 
+  /** The EHR location this clinic is paired with. Set by provisioning only, never from the editable profile. */
   private location(clinic: Clinic): string {
-    return clinic.profile.ehrLocationId ?? String(clinic.id);
+    const loc = this.db.ehrLocationOf(clinic.id);
+    if (!loc) throw new EhrError(503, "This clinic is not paired with an EHR location yet.");
+    return loc;
   }
 
-  /** Finds or creates the EHR patient for a contact and stores the link. */
+  /**
+   * Finds or creates the EHR patient for a contact and stores the link. Matches on the phone number the
+   * channel verified (SMS, WhatsApp, caller ID after verification) only. An email address alone is never
+   * enough to link someone to a chart: anyone can type another person's email.
+   */
   async ensurePatient(clinic: Clinic, contact: Contact): Promise<string> {
     if (contact.external_id) return contact.external_id;
+    if (!contact.phone) throw new EhrError(409, "This person isn't linked to a patient record yet. Staff can link them.");
     const loc = this.location(clinic);
-    const params = new URLSearchParams();
-    if (contact.phone) params.set("phone", contact.phone);
-    if (contact.email) params.set("email", contact.email);
-    let patient: EhrPatient | null = null;
-    if ([...params.keys()].length) {
-      patient = (await this.client.request<{ patient: EhrPatient | null }>(loc, "GET", `/patients/lookup?${params}`)).patient;
-    }
+    let patient = (await this.client.request<{ patient: EhrPatient | null }>(loc, "GET", `/patients/lookup?${new URLSearchParams({ phone: contact.phone })}`)).patient;
     if (!patient) {
       const [firstName, ...rest] = (contact.name ?? "").trim().split(/\s+/);
       patient = (await this.client.request<{ patient: EhrPatient }>(loc, "POST", "/patients", {
-        firstName: firstName || null, lastName: rest.join(" ") || null, phone: contact.phone, email: contact.email,
+        firstName: firstName || null, lastName: rest.join(" ") || null, phone: contact.phone, email: null,
         source: "front-desk-ai",
       })).patient;
     }
@@ -208,10 +210,14 @@ function ehrFailure(err: unknown): BookingResult {
   return { ok: false, reason: "The clinic's scheduling system is unavailable right now. Take the patient's details and create a staff task to book them." };
 }
 
-/** Verifies `X-EHR-Signature: sha256=<hex HMAC of raw body>` on EHR webhooks. */
-export function verifyEhrSignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
-  if (!header?.startsWith("sha256=")) return false;
-  const expected = createHmac("sha256", secret).update(rawBody).digest();
+/**
+ * Verifies an EHR webhook: `X-EHR-Signature: sha256=<hex HMAC of "<timestamp>.<raw body>">` with the
+ * clinic's own pairing secret, and `X-EHR-Timestamp` within 5 minutes (replay protection).
+ */
+export function verifyEhrSignature(secret: string, rawBody: Buffer, header: string | undefined, timestamp: string | undefined, toleranceS = 300): boolean {
+  if (!header?.startsWith("sha256=") || !timestamp || !/^\d{9,11}$/.test(timestamp)) return false;
+  if (Math.abs(Date.now() / 1000 - Number(timestamp)) > toleranceS) return false;
+  const expected = createHmac("sha256", secret).update(`${timestamp}.`).update(rawBody).digest();
   const given = Buffer.from(header.slice(7), "hex");
   return given.length === expected.length && timingSafeEqual(given, expected);
 }

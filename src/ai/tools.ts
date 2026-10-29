@@ -7,6 +7,8 @@ import { practitionerOf, serviceOf } from "../booking/backend.ts";
 import type { Db } from "../db.ts";
 import { normalizePhone } from "../db.ts";
 import type { Events } from "../events.ts";
+import { sha256 } from "../security/crypto.ts";
+import { randomInt } from "node:crypto";
 import type { Channel, Clinic, Contact, Conversation, TaskType } from "../types.ts";
 import { formatLocal, localDate, parseLocalDateTime } from "../time.ts";
 
@@ -20,7 +22,24 @@ export interface ToolContext {
   channel: Channel;
   /** Recorded in created_via / created_by, e.g. "ai:whatsapp". */
   actor: string;
+  /**
+   * True when the channel proved who is writing (SMS/WhatsApp/Messenger/Instagram ids, DMARC-verified email)
+   * or a one-time code was confirmed. Caller ID and unverified email are NOT proof: until verified, the AI
+   * may offer times, book new visits and take messages, but not reveal or change existing appointments.
+   */
+  identityVerified?: boolean;
+  /** Where a one-time code check is remembered: a call id for voice, the conversation for text. */
+  verificationScope?: string;
+  /** Sends a one-time code to the phone or email already on file. Returns where it went, or undefined. */
+  sendCode?: (code: string) => Promise<string | undefined>;
+  /** Booking changes made in this turn (one allowed per turn). */
+  bookingChanges?: number;
 }
+
+/** Most future appointments the AI may hold for one person (prank and spam protection). */
+const MAX_FUTURE_AI_BOOKINGS = 2;
+const MAX_FUTURE_AI_BOOKINGS_SOCIAL_ONLY = 1;
+const MAX_AI_BOOKINGS_PER_CLINIC_HOUR = 20;
 
 export interface ToolOutcome {
   /** Text handed back to the model. */
@@ -62,7 +81,7 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
   {
     name: "get_my_appointments",
-    description: "List this patient's upcoming appointments (ids, times, services).",
+    description: "List this patient's upcoming appointments (ids, times, services). Needs a verified identity: if the result says verification is needed, offer send_verification_code.",
     input_schema: obj({}),
   },
   {
@@ -84,12 +103,22 @@ export const TOOL_DEFINITIONS: Anthropic.Tool[] = [
   },
   {
     name: "update_patient_details",
-    description: "Save contact details the patient gave you (name, email, phone).",
+    description: "Save the patient's name. A new phone number or email is passed to staff to confirm before the clinic uses it; tell the patient a team member will confirm the change.",
     input_schema: obj({
       name: { type: "string" },
       email: { type: "string" },
       phone: { type: "string" },
     }),
+  },
+  {
+    name: "send_verification_code",
+    description: "Send a 6-digit code to the phone number or email the clinic already has on file for this patient, to confirm who they are before discussing or changing existing appointments. Never read the code out yourself.",
+    input_schema: obj({}),
+  },
+  {
+    name: "check_verification_code",
+    description: "Check the 6-digit code the patient read back to you.",
+    input_schema: obj({ code: { type: "string" } }, ["code"]),
   },
   {
     name: "create_staff_task",
@@ -120,6 +149,8 @@ export async function runTool(ctx: ToolContext, name: string, input: Record<stri
       case "cancel_appointment": return await cancel(ctx, input);
       case "reschedule_appointment": return await reschedule(ctx, input);
       case "update_patient_details": return updateDetails(ctx, input);
+      case "send_verification_code": return await sendCode(ctx);
+      case "check_verification_code": return checkCode(ctx, input);
       case "create_staff_task": return createTask(ctx, input);
       case "handoff_to_staff": return handoff(ctx, input);
       default: return { result: `Unknown tool ${name}`, isError: true };
@@ -152,8 +183,43 @@ async function findTimes(ctx: ToolContext, input: Record<string, unknown>): Prom
   return { result: JSON.stringify(slots.map((s) => ({ start: s.start, when: s.label, practitioner_id: s.practitionerId, practitioner: s.practitionerName }))) };
 }
 
+const NEEDS_VERIFICATION: ToolOutcome = {
+  result: "For privacy, existing appointments can only be shared or changed once we confirm who this is. Offer to send a one-time code to the number or email on file (send_verification_code), or take a message for staff.",
+  isError: true,
+};
+
+function verified(ctx: ToolContext): boolean {
+  if (ctx.identityVerified) return true;
+  return !!ctx.verificationScope && ctx.db.isVerified(ctx.contact.id, ctx.verificationScope);
+}
+
+function oneChangePerTurn(ctx: ToolContext): ToolOutcome | undefined {
+  if ((ctx.bookingChanges ?? 0) >= 1) return { result: "Only one booking change can be made per message. Confirm this one with the patient first.", isError: true };
+  ctx.bookingChanges = (ctx.bookingChanges ?? 0) + 1;
+  return undefined;
+}
+
+function staffPaused(ctx: ToolContext): ToolOutcome | undefined {
+  const conv = ctx.db.getConversation(ctx.conversation.id);
+  if (conv && !conv.ai_enabled) return { result: "A team member has taken over this patient's conversation. Don't change bookings; take a message instead.", isError: true };
+  return undefined;
+}
+
 async function book(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
   const { clinic, db, events } = ctx;
+  const blocked = staffPaused(ctx);
+  if (blocked) return blocked;
+  const socialOnly = !ctx.contact.phone && !ctx.contact.email && !ctx.contact.whatsapp_id;
+  const cap = socialOnly ? MAX_FUTURE_AI_BOOKINGS_SOCIAL_ONLY : MAX_FUTURE_AI_BOOKINGS;
+  if (db.futureAiBookings(ctx.contact.id) >= cap) {
+    return { result: `This patient already has ${cap === 1 ? "an upcoming booking" : "upcoming bookings"} made here. For more, create a booking task for staff.`, isError: true };
+  }
+  if (db.aiBookingsSince(clinic.id, new Date(Date.now() - 3600_000).toISOString()) >= MAX_AI_BOOKINGS_PER_CLINIC_HOUR) {
+    db.createTask({ clinicId: clinic.id, type: "booking", priority: "urgent", title: "Unusual number of AI bookings in the last hour: please review", createdBy: "system" });
+    return { result: "Booking is busy right now. Take the patient's details and create a booking task for staff.", isError: true };
+  }
+  const limit = oneChangePerTurn(ctx);
+  if (limit) return limit;
   const name = str(input.patient_name);
   if (name && !ctx.contact.name) ctx.contact = db.updateContact(ctx.contact.id, { name });
   if (!ctx.contact.name) return { result: "Ask the patient for their full name before booking.", isError: true };
@@ -171,6 +237,7 @@ async function book(ctx: ToolContext, input: Record<string, unknown>): Promise<T
 }
 
 async function myAppointments(ctx: ToolContext): Promise<ToolOutcome> {
+  if (!verified(ctx)) return NEEDS_VERIFICATION;
   const appts = await ctx.backend.upcoming(ctx.clinic, ctx.contact);
   if (!appts.length) return { result: "No upcoming appointments on file for this patient." };
   return { result: JSON.stringify(appts.map((a) => ({ appointment_id: a.id, description: describeAppointment(ctx, a) }))) };
@@ -184,6 +251,9 @@ async function ownAppointment(ctx: ToolContext, id: unknown) {
 }
 
 async function cancel(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  if (!verified(ctx)) return NEEDS_VERIFICATION;
+  const blocked = staffPaused(ctx) ?? oneChangePerTurn(ctx);
+  if (blocked) return blocked;
   const appt = await ownAppointment(ctx, input.appointment_id);
   if (!appt) return { result: "No matching upcoming appointment for this patient. Call get_my_appointments first.", isError: true };
   const result = await ctx.backend.cancel(ctx.clinic, appt, str(input.reason));
@@ -195,6 +265,9 @@ async function cancel(ctx: ToolContext, input: Record<string, unknown>): Promise
 }
 
 async function reschedule(ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  if (!verified(ctx)) return NEEDS_VERIFICATION;
+  const blocked = staffPaused(ctx) ?? oneChangePerTurn(ctx);
+  if (blocked) return blocked;
   const appt = await ownAppointment(ctx, input.appointment_id);
   if (!appt) return { result: "No matching upcoming appointment for this patient. Call get_my_appointments first.", isError: true };
   const start = parseLocalDateTime(str(input.new_start) ?? "", ctx.clinic.profile.timezone);
@@ -207,14 +280,56 @@ async function reschedule(ctx: ToolContext, input: Record<string, unknown>): Pro
 }
 
 function updateDetails(ctx: ToolContext, input: Record<string, unknown>): ToolOutcome {
+  const parts: string[] = [];
+  const name = str(input.name);
+  if (name && !ctx.contact.name) {
+    ctx.contact = ctx.db.updateContact(ctx.contact.id, { name: name.slice(0, 80) });
+    parts.push("Name saved.");
+  }
+  // Delivery addresses are never changed by the AI: a stranger could otherwise redirect a patient's messages.
   const email = str(input.email);
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { result: "That email address looks invalid; ask the patient to re-check it.", isError: true };
+  if (email) {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { result: "That email address looks invalid; ask the patient to re-check it.", isError: true };
+    ctx.db.proposeContactChange(ctx.clinic.id, ctx.contact.id, "email", email.toLowerCase(), ctx.actor);
+    parts.push("New email passed to staff to confirm.");
+  }
   const phone = str(input.phone);
-  ctx.contact = ctx.db.updateContact(ctx.contact.id, {
-    name: str(input.name), email: email?.toLowerCase(), phone: phone ? normalizePhone(phone) : undefined,
-  });
+  if (phone) {
+    ctx.db.proposeContactChange(ctx.clinic.id, ctx.contact.id, "phone", normalizePhone(phone), ctx.actor);
+    parts.push("New phone number passed to staff to confirm.");
+  }
+  if (email || phone) {
+    ctx.db.createTask({
+      clinicId: ctx.clinic.id, contactId: ctx.contact.id, conversationId: ctx.conversation.id, type: "records",
+      title: "Confirm a contact detail change the patient asked for", details: "Review and approve it in the patient panel.", createdBy: ctx.actor,
+    });
+  }
   ctx.events.emit("changed", { clinicId: ctx.clinic.id, kind: "contact", id: ctx.contact.id });
-  return { result: "Saved." };
+  return { result: parts.join(" ") || "Nothing to save." };
+}
+
+async function sendCode(ctx: ToolContext): Promise<ToolOutcome> {
+  if (!ctx.sendCode || !ctx.verificationScope) return { result: "Codes can't be sent here. Take a message for staff instead.", isError: true };
+  if (ctx.db.recentVerificationCount(ctx.contact.id, new Date(Date.now() - 3600_000).toISOString()) >= 3) {
+    return { result: "Too many codes requested. Take a message for staff instead.", isError: true };
+  }
+  const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+  const sentTo = await ctx.sendCode(code);
+  if (!sentTo) return { result: "There's no phone number or email on file to send a code to. Take a message for staff instead.", isError: true };
+  ctx.db.createVerification(ctx.clinic.id, ctx.contact.id, ctx.verificationScope, sha256(code));
+  return { result: `Code sent to the ${sentTo} on file. Ask the patient to read it back.` };
+}
+
+function checkCode(ctx: ToolContext, input: Record<string, unknown>): ToolOutcome {
+  if (!ctx.verificationScope) return { result: "No code was sent.", isError: true };
+  const code = (str(input.code) ?? "").replace(/\D/g, "");
+  const outcome = ctx.db.checkVerification(ctx.contact.id, ctx.verificationScope, sha256(code));
+  if (outcome === "ok") {
+    ctx.identityVerified = true;
+    return { result: "Verified. You can now look up and change this patient's appointments." };
+  }
+  if (outcome === "wrong") return { result: "That code doesn't match. They can try again.", isError: true };
+  return { result: "The code expired or was tried too many times. Offer to send a new one, or take a message.", isError: true };
 }
 
 function createTask(ctx: ToolContext, input: Record<string, unknown>): ToolOutcome {
@@ -230,7 +345,10 @@ function createTask(ctx: ToolContext, input: Record<string, unknown>): ToolOutco
 
 function handoff(ctx: ToolContext, input: Record<string, unknown>): ToolOutcome {
   const reason = str(input.reason) ?? "Patient needs a team member";
-  ctx.db.updateConversation(ctx.conversation.id, { ai_enabled: 0, needs_attention: 1, attention_reason: reason });
+  // A phone handoff flags the thread but leaves the text receptionist on; a text handoff pauses it.
+  ctx.db.updateConversation(ctx.conversation.id, ctx.channel === "voice"
+    ? { needs_attention: 1, attention_reason: reason }
+    : { ai_enabled: 0, needs_attention: 1, attention_reason: reason, paused_by: "AI handoff" });
   if (input.urgent) {
     ctx.db.createTask({
       clinicId: ctx.clinic.id, contactId: ctx.contact.id, conversationId: ctx.conversation.id, type: "message",

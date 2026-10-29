@@ -6,7 +6,23 @@ import type { Config } from "../config.ts";
 import type { InboundMessage } from "../types.ts";
 import type { SendResult } from "./index.ts";
 
+interface PostmarkHeader {
+  Name?: string;
+  Value?: string;
+}
+
+/**
+ * Email "From" is easy to forge. Postmark passes the receiving server's authentication results; we trust
+ * the sender only when DMARC passed (or SPF and DKIM both passed).
+ */
+export function senderAuthenticated(headers: PostmarkHeader[] | undefined): boolean {
+  const all = (headers ?? []).filter((h) => /^(authentication-results|arc-authentication-results|received-spf)$/i.test(h.Name ?? "")).map((h) => (h.Value ?? "").toLowerCase()).join(" ");
+  if (/dmarc=pass/.test(all)) return true;
+  return /spf=pass/.test(all) && /dkim=pass/.test(all);
+}
+
 interface PostmarkInbound {
+  Headers?: PostmarkHeader[];
   FromFull?: { Email?: string; Name?: string };
   From?: string;
   FromName?: string;
@@ -26,15 +42,22 @@ export function parseEmailInbound(p: PostmarkInbound): InboundMessage | undefine
   return {
     channel: "email", from: from.toLowerCase(), to: to.toLowerCase(), fromName: p.FromFull?.Name || p.FromName,
     subject: p.Subject ?? "", body: (p.StrippedTextReply || p.TextBody || "").trim(), externalId: p.MessageID,
+    senderVerified: senderAuthenticated(p.Headers),
   };
 }
 
-export async function sendEmail(config: Config, from: string, to: string, subject: string, body: string, fetchImpl = fetch): Promise<SendResult> {
+export async function sendEmail(config: Config, from: string, to: string, subject: string, body: string,
+  opts: { unsubscribeUrl?: string; footer?: string } = {}, fetchImpl = fetch): Promise<SendResult> {
   if (!config.email.postmarkServerToken) return { status: "simulated" };
+  // Commercial email needs a working unsubscribe (CASL s.11) and one-click headers (RFC 8058).
+  const headers = opts.unsubscribeUrl
+    ? [{ Name: "List-Unsubscribe", Value: `<${opts.unsubscribeUrl}>` }, { Name: "List-Unsubscribe-Post", Value: "List-Unsubscribe=One-Click" }]
+    : [];
+  const text = opts.footer ? `${body}\n\n--\n${opts.footer}` : body;
   const res = await fetchImpl("https://api.postmarkapp.com/email", {
     method: "POST",
     headers: { "x-postmark-server-token": config.email.postmarkServerToken, "content-type": "application/json", accept: "application/json" },
-    body: JSON.stringify({ From: from, To: to, Subject: subject, TextBody: body, MessageStream: "outbound" }),
+    body: JSON.stringify({ From: from, To: to, Subject: subject, TextBody: text, MessageStream: opts.unsubscribeUrl ? "broadcast" : "outbound", Headers: headers }),
   });
   const data = (await res.json()) as { MessageID?: string; Message?: string; ErrorCode?: number };
   if (!res.ok || data.ErrorCode) throw new Error(`Postmark: ${data.Message ?? res.status}`);

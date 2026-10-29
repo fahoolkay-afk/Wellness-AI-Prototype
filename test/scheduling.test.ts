@@ -63,3 +63,16 @@ test("rescheduling ignores the appointment's own slot", async () => {
   const moved = await backend.reschedule(s.clinic(), booked.appointment, zonedToUtc(day, "09:30", "America/Toronto").toISOString());
   assert.ok(moved.ok, "overlapping its own old slot is fine");
 });
+
+test("rescheduling refuses the past, last-minute times, closed hours and the wrong practitioner", async () => {
+  const s = setup();
+  const backend = new BuiltinBackend(s.db);
+  const contact = s.db.createContact(s.clinicId, { name: "A Patient", phone: "+14165550001" });
+  const day = nextWeekday(1);
+  const booked = await backend.book(s.clinic(), { contact, serviceId: "physio-initial", practitionerId: "pr-maya", start: zonedToUtc(day, "09:00", "America/Toronto").toISOString(), createdVia: "test" });
+  assert.ok(booked.ok);
+  assert.equal((await backend.reschedule(s.clinic(), booked.appointment, new Date(Date.now() - 3600_000).toISOString())).ok, false, "past");
+  assert.equal((await backend.reschedule(s.clinic(), booked.appointment, new Date(Date.now() + 5 * 60_000).toISOString())).ok, false, "too soon");
+  assert.equal((await backend.reschedule(s.clinic(), booked.appointment, zonedToUtc(day, "23:00", "America/Toronto").toISOString())).ok, false, "closed");
+  assert.equal((await backend.reschedule(s.clinic(), booked.appointment, zonedToUtc(day, "10:00", "America/Toronto").toISOString(), "pr-sofia")).ok, false, "Sofia doesn't offer physio");
+});

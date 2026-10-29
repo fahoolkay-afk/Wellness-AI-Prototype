@@ -19,7 +19,7 @@ const toPatient = (c: Contact) => {
   return { id: c.external_id!, firstName: firstName || null, lastName: rest.join(" ") || null, phone: c.phone, email: c.email };
 };
 
-export function createMockEhr(opts: { apiKey: string; locations?: Record<string, ClinicProfile>; webhookUrl?: string; webhookSecret?: string }) {
+export function createMockEhr(opts: { apiKey: string; locations?: Record<string, ClinicProfile>; webhookUrl?: string; webhookKeyId?: string; webhookSecret?: string }) {
   const db = new Db(":memory:");
   const backend = new BuiltinBackend(db);
   const locations = new Map<string, number>();
@@ -68,9 +68,8 @@ export function createMockEhr(opts: { apiKey: string; locations?: Record<string,
 
   app.get("/patients/lookup", (req, res) => {
     const clinicId = res.locals.clinic.id;
-    const byPhone = req.query.phone ? db.findContactByIdentity(clinicId, "sms", String(req.query.phone)) : undefined;
-    const byEmail = req.query.email ? db.findContactByIdentity(clinicId, "email", String(req.query.email)) : undefined;
-    const found = byPhone ?? byEmail;
+    // Phone only: an email address typed into a chat is too easy to claim (spec section 3).
+    const found = req.query.phone ? db.findContactByIdentity(clinicId, "sms", String(req.query.phone)) : undefined;
     res.json({ patient: found ? toPatient(found) : null });
   });
 
@@ -165,11 +164,15 @@ export function createMockEhr(opts: { apiKey: string; locations?: Record<string,
       return;
     }
     db.sql.prepare("UPDATE appointments SET external_ref = ? WHERE id = ?").run(`apt_${result.appointment.id}`, result.appointment.id);
-    const event = { type: "appointment.created", locationId: req.body?.locationId ?? "loc-harbourfront", appointment: toAppt(db.getAppointment(result.appointment.id)!), patient: toPatient(withId) };
+    const event = { id: `evt_${Date.now()}_${result.appointment.id}`, type: "appointment.created", locationId: req.body?.locationId ?? "loc-harbourfront", appointment: toAppt(db.getAppointment(result.appointment.id)!), patient: toPatient(withId) };
     if (opts.webhookUrl) {
       const body = JSON.stringify(event);
-      const signature = `sha256=${createHmac("sha256", opts.webhookSecret ?? "").update(body).digest("hex")}`;
-      await fetch(opts.webhookUrl, { method: "POST", headers: { "content-type": "application/json", "x-ehr-signature": signature }, body })
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const signature = `sha256=${createHmac("sha256", opts.webhookSecret ?? "").update(`${timestamp}.${body}`).digest("hex")}`;
+      await fetch(opts.webhookUrl, {
+        method: "POST", body,
+        headers: { "content-type": "application/json", "x-ehr-key-id": opts.webhookKeyId ?? "", "x-ehr-timestamp": timestamp, "x-ehr-signature": signature },
+      })
         .catch((err) => console.error("[ehr-mock] webhook failed", err));
     }
     res.status(201).json(event);
@@ -191,7 +194,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const { app } = createMockEhr({
     apiKey: process.env.EHR_API_KEY ?? "dev-ehr-key",
     webhookUrl: process.env.FRONT_DESK_WEBHOOK_URL ?? "http://localhost:3000/webhooks/ehr",
-    webhookSecret: process.env.EHR_WEBHOOK_SECRET ?? "",
+    // From `npm run cli -- pair-ehr` on the front desk (the demo seed pairs "demo-key").
+    webhookKeyId: process.env.EHR_WEBHOOK_KEY_ID ?? "demo-key",
+    webhookSecret: process.env.EHR_WEBHOOK_SECRET ?? "demo-ehr-webhook-secret",
   });
   app.listen(port, () => console.log(`Mock EHR listening on http://localhost:${port} (API key: ${process.env.EHR_API_KEY ?? "dev-ehr-key"})`));
 }

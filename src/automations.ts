@@ -6,8 +6,10 @@ import { practitionerOf, serviceOf } from "./booking/backend.ts";
 import { parseTags, type Db } from "./db.ts";
 import type { Events } from "./events.ts";
 import type { Inbox } from "./inbox.ts";
+import { reachableChannels } from "./channels/index.ts";
+import { privacyProblems } from "./policy/guards.ts";
 import type { Appointment, Automation, AutomationAction, Channel, Clinic, Contact, Stage } from "./types.ts";
-import { formatLocal } from "./time.ts";
+import { formatLocal, localDateTime } from "./time.ts";
 
 const HOUR = 3600_000;
 /** Timer triggers only look this far back, so enabling an automation doesn't message old patients. */
@@ -54,11 +56,12 @@ export class Automations {
     }
   }
 
-  /** Evaluates timer-based triggers for every clinic. */
+  /** Evaluates timer-based triggers for every clinic. Nothing the clinic starts goes out during quiet hours. */
   async tick(now = new Date()): Promise<void> {
     const t = now.getTime();
     const iso = (ms: number) => new Date(ms).toISOString();
     for (const clinic of this.db.listClinics()) {
+      if (inQuietHours(clinic, now)) continue;
       for (const automation of clinic.profile.automations) {
         if (!automation.enabled) continue;
         const trigger = automation.trigger;
@@ -113,14 +116,16 @@ export class Automations {
 
   private async act(clinic: Clinic, automation: Automation, action: AutomationAction, contact: Contact, appt?: Appointment): Promise<Contact> {
     switch (action.type) {
-      case "send_message":
+      case "send_message": {
         // The AI already confirmed in the chat it booked from; a second confirmation there is noise.
         // Phone and staff bookings still get the written confirmation.
         if (automation.trigger.type === "appointment_booked" && appt && /^ai:(?!voice)/.test(appt.created_via)) return contact;
-        await this.inbox.sendToContact(clinic, contact, action.channel, renderTemplate(action.template, clinic, contact, appt), {
-          authorName: `Automation: ${automation.name}`, subject: action.subject ?? automation.name,
+        const outcome = await this.inbox.sendToContact(clinic, contact, action.channel, (channel) => renderTemplate(action.template, clinic, contact, appt, channel), {
+          authorName: `Automation: ${automation.name}`, subject: action.subject ?? automation.name, purpose: action.purpose ?? "service",
         });
+        if ("skipped" in outcome) console.info(`[automations] ${automation.id} skipped contact ${contact.id}: ${outcome.skipped}`);
         return this.db.getContact(contact.id)!;
+      }
       case "add_tag":
         return addTag(this.db, this.events, contact, action.tag);
       case "set_stage":
@@ -136,20 +141,97 @@ export class Automations {
     }
   }
 
-  /** One-off message to every contact matching a tag and/or stage. Skips SMS opt-outs. */
-  async broadcast(clinic: Clinic, opts: { tag?: string; stage?: Stage; channel: Channel | "preferred"; template: string; subject?: string; name: string }): Promise<{ sent: number; skipped: number }> {
+  /**
+   * Who a campaign would reach, without sending: counts per channel and why the rest are skipped.
+   * Audiences are limited to pipeline stage and the clinic's approved (non-clinical) audience tags.
+   */
+  preview(clinic: Clinic, opts: CampaignOptions): CampaignPreview {
+    const audienceProblem = campaignProblem(clinic, opts);
+    if (audienceProblem) return { matched: 0, eligible: 0, byChannel: {}, skipped: {}, problem: audienceProblem };
+    const contacts = this.db.listContacts(clinic.id, { tag: opts.tag, stage: opts.stage });
+    const byChannel: Record<string, number> = {};
+    const skipped: Record<string, number> = {};
+    for (const contact of contacts) {
+      const choice = this.chooseChannel(clinic, contact, opts);
+      if ("channel" in choice) byChannel[choice.channel] = (byChannel[choice.channel] ?? 0) + 1;
+      else skipped[choice.skipped] = (skipped[choice.skipped] ?? 0) + 1;
+    }
+    const eligible = Object.values(byChannel).reduce((a, b) => a + b, 0);
+    return { matched: contacts.length, eligible, byChannel, skipped };
+  }
+
+  private chooseChannel(clinic: Clinic, contact: Contact, opts: CampaignOptions): { channel: Channel } | { skipped: string } {
+    const reachable = reachableChannels(contact);
+    const order = opts.channel === "preferred"
+      ? [contact.preferred_channel, ...reachable].filter((c, i, a): c is Channel => !!c && c !== "voice" && a.indexOf(c) === i && reachable.includes(c as Channel))
+      : reachable.includes(opts.channel) ? [opts.channel] : [];
+    if (!order.length) return { skipped: "no address on that channel" };
+    const conv = this.db.conversationForContact(contact, order[0]);
+    let reason = "no consent";
+    for (const channel of order) {
+      const problem = this.inbox.sendProblem(clinic, contact, conv.id, channel, renderTemplate(opts.template, clinic, contact, undefined, channel), { purpose: opts.purpose });
+      if (!problem) return { channel };
+      reason = problem.replace(/ for \w+$/, "").replace(/ on (sms|whatsapp|email|messenger|instagram)\b.*$/, "");
+    }
+    return { skipped: reason };
+  }
+
+  /** Sends a campaign (owner only, confirmed in the app first). Attributed to the person who sent it. */
+  async broadcast(clinic: Clinic, opts: CampaignOptions, staff: { id: number; name: string }): Promise<{ sent: number; skipped: number }> {
+    const problem = campaignProblem(clinic, opts);
+    if (problem) throw new Error(problem);
+    if (inQuietHours(clinic, new Date())) throw new Error("It's quiet hours for this clinic. Schedule the campaign for the daytime.");
     const contacts = this.db.listContacts(clinic.id, { tag: opts.tag, stage: opts.stage });
     let sent = 0;
     let skipped = 0;
     for (const contact of contacts) {
-      const message = await this.inbox.sendToContact(clinic, contact, opts.channel, renderTemplate(opts.template, clinic, contact), {
-        authorName: `Broadcast: ${opts.name}`, subject: opts.subject,
+      const outcome = await this.inbox.sendToContact(clinic, contact, opts.channel, (channel) => renderTemplate(opts.template, clinic, contact, undefined, channel), {
+        authorName: `Campaign "${opts.name}" by ${staff.name}`, subject: opts.subject, purpose: opts.purpose, staffUserId: staff.id,
       });
-      if (message && message.status !== "failed") sent++;
+      if ("message" in outcome && outcome.message.status !== "failed") sent++;
       else skipped++;
     }
     return { sent, skipped };
   }
+}
+
+export interface CampaignOptions {
+  name: string;
+  tag?: string;
+  stage?: Stage;
+  channel: Channel | "preferred";
+  template: string;
+  subject?: string;
+  /** marketing (express consent) or service (only to patients with a booking, e.g. a closure notice). */
+  purpose: "service" | "marketing";
+}
+
+export interface CampaignPreview {
+  matched: number;
+  eligible: number;
+  byChannel: Record<string, number>;
+  skipped: Record<string, number>;
+  problem?: string;
+}
+
+function campaignProblem(clinic: Clinic, opts: CampaignOptions): string | undefined {
+  if (!opts.template.trim()) return "The message is empty.";
+  if (opts.tag && !(clinic.profile.audienceTags ?? []).includes(opts.tag)) {
+    return `"${opts.tag}" isn't an approved audience tag. Campaigns can't target clinical tags; the owner can approve non-clinical tags in Settings.`;
+  }
+  if (opts.purpose === "service" && opts.stage !== "booked") return "Service notices can only go to patients with a booking. Use a marketing campaign for everyone else.";
+  for (const channel of ["sms", "whatsapp"] as Channel[]) {
+    const privacy = privacyProblems(opts.template, channel, clinic);
+    if (privacy.length && opts.channel !== "email") return `The message names health details (${privacy.join(", ")}). Keep campaigns general.`;
+  }
+  return undefined;
+}
+
+/** Quiet hours in clinic-local time (default 21:00 to 08:00). */
+export function inQuietHours(clinic: Clinic, now: Date): boolean {
+  const { start, end } = clinic.profile.quietHours ?? { start: "08:00", end: "21:00" };
+  const hhmm = localDateTime(now, clinic.profile.timezone).slice(11);
+  return hhmm < start || hhmm >= end;
 }
 
 export function addTag(db: Db, events: Events, contact: Contact, tag: string): Contact {
@@ -160,8 +242,14 @@ export function addTag(db: Db, events: Events, contact: Contact, tag: string): C
   return updated;
 }
 
-export function renderTemplate(template: string, clinic: Clinic, contact: Contact, appt?: Appointment): string {
+/**
+ * Fills a template. On SMS, WhatsApp, Messenger and Instagram the service is shown as "appointment" and the
+ * practitioner by first name only, so lock screens and shared phones don't reveal the type of care.
+ */
+export function renderTemplate(template: string, clinic: Clinic, contact: Contact, appt?: Appointment, channel: Channel = "email"): string {
   const p = clinic.profile;
+  const detailed = channel === "email";
+  const practitionerName = appt ? practitionerOf(clinic, appt.practitioner_id)?.name ?? "" : "";
   const vars: Record<string, string> = {
     first_name: contact.name?.split(" ")[0] ?? "there",
     name: contact.name ?? "",
@@ -170,8 +258,8 @@ export function renderTemplate(template: string, clinic: Clinic, contact: Contac
     review_url: p.reviewUrl ?? p.website,
     booking_url: p.bookingProvider === "jane" && p.janeBookingUrl ? p.janeBookingUrl : p.website,
     appointment_time: appt ? formatLocal(appt.starts_at, p.timezone) : "",
-    service: appt ? serviceOf(clinic, appt.service_id)?.name ?? appt.service_id : "",
-    practitioner: appt ? practitionerOf(clinic, appt.practitioner_id)?.name ?? "" : "",
+    service: appt ? (detailed ? serviceOf(clinic, appt.service_id)?.name ?? "appointment" : "appointment") : "",
+    practitioner: detailed ? practitionerName : practitionerName.split(" ")[0] ?? "",
   };
   return template.replace(/\{\{\s*(\w+)\s*\}\}/g, (match, key: string) => vars[key] ?? match);
 }

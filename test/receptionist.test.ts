@@ -26,7 +26,7 @@ function fakeClaude(script: (params: CreateParams, call: number) => Partial<Anth
 }
 
 test("toClaudeMessages alternates roles and labels staff and system notes", () => {
-  const base = { conversation_id: 1, channel: "sms", direction: "in", author_name: null, subject: null, status: "received", external_id: null, error: null, created_at: "" } as const;
+  const base = { conversation_id: 1, channel: "sms", direction: "in", author_name: null, subject: null, status: "received", external_id: null, error: null, created_at: "", purpose: null, sender_verified: 1, simulated: 0, staff_user_id: null, purged_at: null } as const;
   const history: Message[] = [
     { ...base, id: 1, author: "ai", direction: "out", body: "Reminder: tomorrow at 9", status: "sent" },
     { ...base, id: 2, author: "patient", body: "thanks" },
@@ -38,7 +38,8 @@ test("toClaudeMessages alternates roles and labels staff and system notes", () =
   const messages = toClaudeMessages(history);
   assert.deepEqual(messages.map((m) => m.role), ["user", "assistant", "user", "assistant", "user"]);
   assert.match(String(messages[2].content), /thanks[\s\S]*can I move it/);
-  assert.match(String(messages[3].content), /staff member Alex/);
+  assert.match(String(messages[3].content), /Sent by a staff member/);
+  assert.doesNotMatch(JSON.stringify(messages), /Alex/, "staff names are not sent to the model");
   assert.match(String(messages[4].content), /system note/);
   assert.ok(!JSON.stringify(messages).includes("draft"));
 });
@@ -103,4 +104,43 @@ test("patients cannot cancel someone else's appointment", async () => {
   }, "cancel_appointment", { appointment_id: appt.id });
   assert.equal(outcome.isError, true);
   assert.equal(s.db.getAppointment(appt.id)!.status, "booked");
+});
+
+test("existing appointments stay private until the person proves who they are", async () => {
+  const s = setup();
+  const patient = s.db.createContact(s.clinicId, { name: "Real Patient", phone: "+14165550001", email: "real@example.com" });
+  s.db.createAppointment({ clinic_id: s.clinicId, contact_id: patient.id, service_id: "rmt-60", practitioner_id: "pr-sofia", starts_at: zonedToUtc(nextWeekday(2), "10:00", "America/Toronto").toISOString(), ends_at: zonedToUtc(nextWeekday(2), "11:00", "America/Toronto").toISOString(), created_via: "test" });
+  const { runTool } = await import("../src/ai/tools.ts");
+  const codes: string[] = [];
+  const ctx = {
+    db: s.db, events: s.events, backend: s.backends.forClinic(s.clinic()), clinic: s.clinic(), contact: patient,
+    conversation: s.db.conversationForContact(patient, "voice"), channel: "voice" as const, actor: "ai:voice",
+    identityVerified: false, verificationScope: "call:test-1", sendCode: async (code: string) => { codes.push(code); return "the phone on file"; },
+  };
+  const blocked = await runTool({ ...ctx }, "get_my_appointments", {});
+  assert.match(blocked.result, /confirm who this is/);
+  await runTool(ctx, "send_verification_code", {});
+  assert.equal(codes.length, 1);
+  assert.match(codes[0], /^\d{6}$/);
+  const wrong = await runTool(ctx, "check_verification_code", { code: codes[0] === "000000" ? "111111" : "000000" });
+  assert.equal(wrong.isError, true);
+  await runTool(ctx, "check_verification_code", { code: codes[0] });
+  const allowed = await runTool(ctx, "get_my_appointments", {});
+  assert.doesNotMatch(allowed.result, /confirm who this is/);
+  assert.equal(JSON.parse(allowed.result).length, 1);
+  // A code is never stored in clear.
+  assert.ok(!JSON.stringify(s.db.sql.prepare("SELECT * FROM verifications").all()).includes(codes[0]));
+});
+
+test("the AI cannot change where messages go; it files a proposal for staff", async () => {
+  const s = setup();
+  const patient = s.db.createContact(s.clinicId, { name: "Pat Phone", phone: "+14165550031" });
+  const { runTool } = await import("../src/ai/tools.ts");
+  const ctx = {
+    db: s.db, events: s.events, backend: s.backends.forClinic(s.clinic()), clinic: s.clinic(), contact: patient,
+    conversation: s.db.conversationForContact(patient, "sms"), channel: "sms" as const, actor: "ai:sms", identityVerified: true,
+  };
+  await runTool(ctx, "update_patient_details", { email: "attacker@example.com" });
+  assert.equal(s.db.getContact(patient.id)!.email, null, "email unchanged until staff approve");
+  assert.equal(s.db.listProposals(patient.id).length, 1);
 });

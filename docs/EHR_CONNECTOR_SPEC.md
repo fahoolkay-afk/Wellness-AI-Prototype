@@ -38,8 +38,9 @@ automations, broadcasts) is identical in both editions.
 
 ## Endpoints the EHRM implements
 
-### `GET /patients/lookup?phone=&email=`
-Find a patient by E.164 phone (`+14165550123`) and/or email. Either may be absent.
+### `GET /patients/lookup?phone=`
+Find a patient by E.164 phone (`+14165550123`). Phone only: an email address typed into a chat proves
+nothing about who is writing, so the front desk never looks patients up by email.
 ```json
 { "patient": { "id": "pat_123", "firstName": "Priya", "lastName": "Sharma", "phone": "+14165550123", "email": "priya@example.com" } }
 ```
@@ -93,18 +94,29 @@ Response `201`. This is best effort: failures are logged and never block messagi
 
 ## Webhooks the EHRM sends to the front desk
 
-`POST {FRONT_DESK_URL}/webhooks/ehr`, signed with
-`X-EHR-Signature: sha256=<hex HMAC-SHA256 of the raw body using EHR_WEBHOOK_SECRET>`.
+`POST {FRONT_DESK_URL}/webhooks/ehr` with three headers:
+
+| Header | Value |
+|---|---|
+| `X-EHR-Key-Id` | the key id printed by `npm run cli -- pair-ehr <clinicId> <locationId>` |
+| `X-EHR-Timestamp` | Unix seconds when you signed |
+| `X-EHR-Signature` | `sha256=<hex HMAC-SHA256 of "<timestamp>.<raw body>" using that key's secret>` |
+
+Each clinic location has its own key. The front desk picks the clinic from the key, not from the body,
+refuses a body whose `locationId` doesn't match the key, refuses timestamps more than 5 minutes old,
+and applies each event `id` once (replays are acknowledged and ignored).
 
 Send these when something changes on the EHRM side (staff booked at the desk, a practitioner
 cancelled, a visit was marked complete), so reminders and follow-ups stay correct:
 
 ```json
-{ "type": "appointment.created", "locationId": "loc-harbourfront",
+{ "id": "evt_01J9ZK3", "type": "appointment.created", "locationId": "loc-harbourfront",
   "appointment": { ...Appointment },
   "patient": { "id": "pat_123", "firstName": "Priya", "lastName": "Sharma", "phone": "+14165550123", "email": null } }
 ```
 - `type`: `appointment.created | appointment.updated | appointment.cancelled | appointment.completed | patient.updated`
+- `id`: unique per event (6 to 100 characters of letters, digits, `.`, `:`, `_`, `-`). Reuse it on retries.
+- A phone or email change in `patient.updated` waits for staff approval in the front desk before it is used.
 - Include `patient` whenever the front desk might not know them yet (always is simplest).
 - Retry on non-2xx with backoff. The front desk upserts by id, so redelivery is safe.
 

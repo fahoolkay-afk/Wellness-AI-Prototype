@@ -17,25 +17,38 @@ export interface Responder {
   reply(ctx: ToolContext, history: Message[]): Promise<Reply>;
 }
 
-const MAX_TOOL_ROUNDS = 8;
-const HISTORY_LIMIT = 40;
+const MAX_TOOL_ROUNDS = 6;
+/** Only the recent part of the conversation goes to the model (data minimisation and cost). */
+const HISTORY_LIMIT = 16;
+const HISTORY_CHAR_BUDGET = 12_000;
 
-/** Converts the stored thread into alternating user/assistant turns for Claude. */
+/** Converts the stored thread into alternating user/assistant turns for Claude, sending only what's needed. */
 export function toClaudeMessages(history: Message[]): Anthropic.Beta.BetaMessageParam[] {
   const turns: { role: "user" | "assistant"; parts: string[] }[] = [];
-  for (const m of history.slice(-HISTORY_LIMIT)) {
-    if (m.status === "draft" || m.status === "failed") continue;
+  let budget = HISTORY_CHAR_BUDGET;
+  const recent: Message[] = [];
+  for (const m of [...history].reverse()) {
+    if (m.status === "draft" || m.status === "failed" || m.purged_at) continue;
+    if (recent.length >= HISTORY_LIMIT || budget - m.body.length < 0) break;
+    budget -= m.body.length;
+    recent.unshift(m);
+  }
+  for (const m of recent) {
     let role: "user" | "assistant";
     let text: string;
     if (m.author === "patient") {
       role = "user";
-      text = m.channel === "email" && m.subject ? `[Email, subject: ${m.subject}]\n${m.body}` : `[${m.channel}] ${m.body}`;
+      text = `[${m.channel}] ${m.body}`;
+    } else if (m.author === "call") {
+      role = "user";
+      // Written from what a caller said; caller ID can be faked. Never treat it as proof of identity.
+      text = `[Summary of a phone call, based on what the caller said. Unverified.] ${m.body}`;
     } else if (m.author === "system") {
       role = "user";
-      text = `[Clinic system note, not written by the patient] ${m.body}`;
+      text = `[Clinic system note] ${m.body}`;
     } else {
       role = "assistant";
-      text = m.author === "staff" ? `[Sent by staff member ${m.author_name ?? ""}] ${m.body}` : m.body;
+      text = m.author === "staff" ? `[Sent by a staff member] ${m.body}` : m.body;
     }
     const last = turns.at(-1);
     if (last?.role === role) last.parts.push(text);
@@ -61,7 +74,7 @@ export class ClaudeResponder implements Responder {
 
     const system: Anthropic.Beta.BetaTextBlockParam[] = [
       { type: "text", text: staticSystemPrompt(ctx.clinic), cache_control: { type: "ephemeral" } },
-      { type: "text", text: turnContext(ctx.clinic, ctx.contact, ctx.channel) },
+      { type: "text", text: turnContext(ctx.clinic, ctx.contact, ctx.channel, ctx.identityVerified || (!!ctx.verificationScope && ctx.db.isVerified(ctx.contact.id, ctx.verificationScope))) },
     ];
     const toolsUsed: string[] = [];
     let handedOff = false;
@@ -69,7 +82,8 @@ export class ClaudeResponder implements Responder {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await this.client.beta.messages.create({
         model: this.config.model,
-        max_tokens: 16000,
+        // Short chat replies; a hard cap also limits the cost of abusive or very long inputs.
+        max_tokens: 4096,
         system,
         tools: TOOL_DEFINITIONS,
         messages,

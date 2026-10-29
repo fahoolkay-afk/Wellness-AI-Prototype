@@ -95,20 +95,27 @@ export class BuiltinBackend implements PracticeBackend {
     const service = serviceOf(clinic, appointment.service_id);
     if (!service) return { ok: false, reason: "The original service no longer exists." };
     const pid = practitionerId ?? appointment.practitioner_id;
+    const practitioner = practitionerOf(clinic, pid);
+    if (!practitioner || !practitioner.services.includes(service.id)) return { ok: false, reason: `That practitioner does not offer ${service.name}.` };
     const start = new Date(newStart);
     const end = new Date(start.getTime() + service.durationMin * 60_000);
-    // Ignore the appointment being moved when checking for conflicts.
-    const conflicts = this.db.appointmentsBetween(clinic.id, start.toISOString(), end.toISOString(), pid)
-      .filter((a) => a.id !== appointment.id);
-    if (conflicts.length || !(await this.isWithinHours(clinic, pid, start, end))) {
+    if (Number.isNaN(start.getTime()) || start.getTime() < Date.now() + MIN_LEAD_MS) {
+      return { ok: false, reason: "That time is too soon or in the past. Please offer the patient other times." };
+    }
+    if (!(await this.isWithinHours(clinic, pid, start, end))) {
       return { ok: false, reason: "That new time is not available. Please offer the patient other times." };
     }
-    return {
-      ok: true,
-      appointment: this.db.updateAppointment(appointment.id, {
-        starts_at: start.toISOString(), ends_at: end.toISOString(), practitioner_id: pid, reminder_sent_at: null,
-      }),
-    };
+    return this.db.transaction(() => {
+      // Ignore the appointment being moved when checking for conflicts.
+      const conflicts = this.db.appointmentsBetween(clinic.id, start.toISOString(), end.toISOString(), pid).filter((a) => a.id !== appointment.id);
+      if (conflicts.length) return { ok: false, reason: "That new time is not available. Please offer the patient other times." } as const;
+      return {
+        ok: true,
+        appointment: this.db.updateAppointment(appointment.id, {
+          starts_at: start.toISOString(), ends_at: end.toISOString(), practitioner_id: pid, reminder_sent_at: null,
+        }),
+      } as const;
+    });
   }
 
   async upcoming(_clinic: Clinic, contact: Contact): Promise<Appointment[]> {

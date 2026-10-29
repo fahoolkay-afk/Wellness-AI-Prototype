@@ -5,7 +5,9 @@ export const CHANNELS: Channel[] = ["sms", "whatsapp", "messenger", "instagram",
 /** How the AI behaves on a channel: reply on its own, draft for staff approval, or stay silent. */
 export type AiMode = "auto" | "draft" | "off";
 
-export type MessageAuthor = "patient" | "ai" | "staff" | "system";
+export type MessageAuthor = "patient" | "ai" | "staff" | "system" | "call";
+/** reply: an answer to the patient; service: reminders and confirmations; marketing: campaigns and recalls. */
+export type MessagePurpose = "reply" | "service" | "marketing";
 export type MessageStatus = "received" | "sent" | "simulated" | "draft" | "failed";
 
 export interface Practitioner {
@@ -46,6 +48,16 @@ export interface ClinicProfile {
   /** EHR-connected edition: this clinic's location id in the EHRM. */
   ehrLocationId?: string;
   reviewUrl?: string;
+  /** Which wording rules apply (see src/policy/guards.ts). Missing = all of them. */
+  wordingRules?: string[];
+  /** Tags staff may use to pick a campaign audience. Clinical tags are never allowed. */
+  audienceTags?: string[];
+  /** Days to keep message text and call text in the cloud before it is cleared (metadata stays). */
+  retention?: { messageDays: number; callDays: number };
+  /** Set once the clinic has signed agreements with the AI and voice processors (PHIPA s.17, O. Reg. 329/04). */
+  processorAgreementsRecorded?: boolean;
+  /** Quiet hours for automated and campaign messages, clinic-local "HH:MM". */
+  quietHours?: { start: string; end: string };
   aiModes: Record<Channel, AiMode>;
   automations: Automation[];
 }
@@ -69,8 +81,12 @@ export type AutomationTrigger =
   | { type: "tag_added"; tag: string };
 
 export type AutomationAction =
-  /** `template` supports {{first_name}}, {{clinic_name}}, {{appointment_time}}, {{service}}, {{practitioner}}, {{review_url}}, {{booking_url}}. */
-  | { type: "send_message"; channel: "preferred" | Channel; template: string; subject?: string }
+  /**
+   * `template` supports {{first_name}}, {{clinic_name}}, {{appointment_time}}, {{practitioner}} (first name),
+   * {{review_url}}, {{booking_url}}. {{service}} is shown only in email; other channels say "appointment".
+   * `purpose` decides the consent needed: service (reminders) or marketing (express consent only).
+   */
+  | { type: "send_message"; channel: "preferred" | Channel; template: string; subject?: string; purpose: "service" | "marketing" }
   | { type: "add_tag"; tag: string }
   | { type: "set_stage"; stage: Stage }
   | { type: "create_task"; title: string; taskType?: TaskType };
@@ -121,6 +137,7 @@ export interface Conversation {
   last_message_at: string;
   unread: number;
   status: "open" | "closed";
+  paused_by: string | null;
 }
 
 export interface Message {
@@ -136,6 +153,11 @@ export interface Message {
   external_id: string | null;
   error: string | null;
   created_at: string;
+  purpose: MessagePurpose | null;
+  sender_verified: number;
+  simulated: number;
+  staff_user_id: number | null;
+  purged_at: string | null;
 }
 
 export interface Appointment {
@@ -153,6 +175,7 @@ export interface Appointment {
   followup_sent_at: string | null;
   external_ref: string | null;
   created_at: string;
+  confirmed_at: string | null;
 }
 
 export type TaskType = "callback" | "message" | "booking" | "billing" | "insurance" | "records" | "other";
@@ -197,4 +220,8 @@ export interface InboundMessage {
   body: string;
   subject?: string;
   externalId?: string;
+  /** False when the channel couldn't authenticate the sender (e.g. email without DMARC pass). */
+  senderVerified?: boolean;
+  /** Injected by the staff test console; never changes consent or reaches the EHR. */
+  simulated?: boolean;
 }

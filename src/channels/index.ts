@@ -24,49 +24,53 @@ export function reachableChannels(contact: Contact): Channel[] {
   return out;
 }
 
-/** Picks the channel for an outbound message: requested, else preferred, else first reachable. */
-export function pickChannel(contact: Contact, requested?: Channel | "preferred"): Channel | undefined {
-  const reachable = reachableChannels(contact);
-  // Calls can't be "replied" to; follow up by text instead.
-  const want = requested === "voice" ? "sms" : requested;
-  if (want && want !== "preferred") return reachable.includes(want) ? want : undefined;
-  const preferred = contact.preferred_channel === "voice" ? "sms" : contact.preferred_channel;
-  if (preferred && reachable.includes(preferred)) return preferred;
-  return reachable[0];
+/** North American Numbering Plan (+1): Canada, the US and some Caribbean nations. */
+export function isNanp(phone: string): boolean {
+  const digits = phone.replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") && /^1[2-9]\d{2}[2-9]\d{6}$/.test(digits);
 }
 
 export class Channels {
   private readonly db: Db;
   private readonly config: Config;
   private readonly fetchImpl: typeof fetch;
+  private readonly unsubscribeUrl: (clinicId: number, contactId: number, channel: Channel) => string;
 
-  constructor(db: Db, config: Config, fetchImpl: typeof fetch = fetch) {
+  constructor(db: Db, config: Config, unsubscribeUrl: (clinicId: number, contactId: number, channel: Channel) => string, fetchImpl: typeof fetch = fetch) {
     this.db = db;
     this.config = config;
+    this.unsubscribeUrl = unsubscribeUrl;
     this.fetchImpl = fetchImpl;
   }
 
-  async send(clinic: Clinic, contact: Contact, channel: Channel, body: string, subject?: string): Promise<SendResult> {
+  async send(clinic: Clinic, contact: Contact, channel: Channel, body: string, opts: { subject?: string; purpose: "service" | "marketing" }): Promise<SendResult> {
     const from = this.db.channelAddress(clinic.id, channel === "voice" ? "sms" : channel);
     if (!from) throw new ChannelError(`${clinic.name} has no ${channel} account connected`);
     switch (channel) {
       case "voice":
       case "sms":
-        if (!contact.phone) throw new ChannelError("Contact has no phone number");
-        if (contact.opted_out) throw new ChannelError("Contact opted out of SMS (texted STOP)");
-        return sendSms(this.config, from, contact.phone, body, this.fetchImpl);
+        if (!contact.phone) throw new ChannelError("Patient has no phone number");
+        if (!this.config.security.allowInternational && !isNanp(contact.phone)) throw new ChannelError("Texts outside North America are switched off");
+        return sendSms(this.config, from, contact.phone, opts.purpose === "marketing" ? `${body}\nReply STOP to opt out.` : body, this.fetchImpl);
       case "whatsapp":
-        if (!contact.whatsapp_id) throw new ChannelError("Contact has no WhatsApp");
+        if (!contact.whatsapp_id) throw new ChannelError("Patient has no WhatsApp");
         return sendWhatsApp(this.config, from, contact.whatsapp_id, body, this.fetchImpl);
       case "messenger":
-        if (!contact.messenger_id) throw new ChannelError("Contact has no Messenger id");
+        if (!contact.messenger_id) throw new ChannelError("Patient has no Messenger id");
         return sendPageMessage(this.config, contact.messenger_id, body, this.fetchImpl);
       case "instagram":
-        if (!contact.instagram_id) throw new ChannelError("Contact has no Instagram id");
+        if (!contact.instagram_id) throw new ChannelError("Patient has no Instagram id");
         return sendPageMessage(this.config, contact.instagram_id, body, this.fetchImpl);
-      case "email":
-        if (!contact.email) throw new ChannelError("Contact has no email address");
-        return sendEmail(this.config, `${clinic.name} <${from}>`, contact.email, subject || `Message from ${clinic.name}`, body, this.fetchImpl);
+      case "email": {
+        if (!contact.email) throw new ChannelError("Patient has no email address");
+        const marketing = opts.purpose === "marketing";
+        const unsubscribe = marketing ? this.unsubscribeUrl(clinic.id, contact.id, "email") : undefined;
+        return sendEmail(this.config, `${clinic.name} <${from}>`, contact.email, opts.subject || `Message from ${clinic.name}`, body, {
+          unsubscribeUrl: unsubscribe,
+          // CASL identification: who sent it, how to reach them, how to stop.
+          footer: marketing ? `${clinic.profile.name}, ${clinic.profile.address}. ${clinic.profile.phone}. Unsubscribe: ${unsubscribe}` : undefined,
+        }, this.fetchImpl);
+      }
     }
   }
 

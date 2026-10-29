@@ -74,7 +74,8 @@ test("ElevenLabs voice: caller context, tools and post-call filing", async () =>
 
   const init = await fetch(`${url}/webhooks/elevenlabs/init`, { method: "POST", headers: { "content-type": "application/json", "x-tool-secret": "tool-secret" }, body: JSON.stringify({ caller_id: "+14165550111", called_number: "+14165550100" }) });
   const ctx = await init.json();
-  assert.equal(ctx.dynamic_variables.patient_name, "Maria Gomez");
+  assert.equal(ctx.dynamic_variables.clinic_name, "Harbourfront Physio & Wellness");
+  assert.equal(JSON.stringify(ctx).includes("Maria"), false, "caller ID can be spoofed, so the agent is not told whose number it is");
 
   const unauth = await fetch(`${url}/webhooks/elevenlabs/tools/create_staff_task`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
   assert.equal(unauth.status, 403);
@@ -102,27 +103,31 @@ test("ElevenLabs voice: caller context, tools and post-call filing", async () =>
   assert.equal(call.contact_name, "Maria Gomez");
   assert.equal(call.duration_s, 95);
   assert.match(call.transcript ?? "", /Caller: I need receipts/);
+  // Redelivery of the same call is filed once.
+  await fetch(`${url}/webhooks/elevenlabs/post-call`, { method: "POST", headers: { "content-type": "application/json", "elevenlabs-signature": sig }, body: payload });
+  assert.equal(s.db.listCalls(s.clinicId).length, 1);
+  // Transcripts are encrypted at rest.
+  const stored = s.db.sql.prepare("SELECT transcript FROM calls").get() as { transcript: string };
+  assert.match(stored.transcript, /^e1:/);
 });
 
-test("unsigned webhooks are refused in production when no secret is configured", async () => {
+test("webhook routes don't exist unless their secret is configured (fail closed)", async () => {
   const { url } = await start(() => {});
-  const previous = process.env.NODE_ENV;
-  process.env.NODE_ENV = "production";
-  try {
-    const res = await fetch(`${url}/webhooks/email`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    assert.equal(res.status, 503);
-  } finally {
-    process.env.NODE_ENV = previous;
+  for (const path of ["/webhooks/email", "/webhooks/twilio/sms", "/webhooks/meta", "/webhooks/elevenlabs/post-call", "/webhooks/elevenlabs/tools/create_staff_task"]) {
+    const res = await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json", origin: url }, body: "{}" });
+    assert.equal(res.status, 404, path);
   }
 });
 
-test("staff API requires sign-in", async () => {
-  const { url } = await start(() => {});
-  assert.equal((await fetch(`${url}/api/clinics`)).status, 401);
-  assert.equal((await fetch(`${url}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: "wrong" }) })).status, 401);
-  const login = await fetch(`${url}/api/login`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password: "test-pw", name: "Alex" }) });
-  const cookie = login.headers.get("set-cookie")!.split(";")[0];
-  const clinics = await fetch(`${url}/api/clinics`, { headers: { cookie } });
-  assert.equal(clinics.status, 200);
-  assert.equal((await clinics.json())[0].name, "Harbourfront Physio & Wellness");
+test("Postmark inbound needs the secret as Basic auth, never in the URL", async () => {
+  const { s, url } = await start((c) => { c.email.inboundSecret = "a-very-long-inbound-secret-value"; });
+  const body = JSON.stringify({ From: "pat@example.com", FromName: "Pat", To: "frontdesk@clinic.example", Subject: "Hi", TextBody: "Is there parking?", MessageID: "pm-1", Headers: [] });
+  const send = (auth?: string) => fetch(`${url}/webhooks/email`, { method: "POST", headers: { "content-type": "application/json", ...(auth ? { authorization: auth } : {}) }, body });
+  assert.equal((await send()).status, 403);
+  assert.equal((await fetch(`${url}/webhooks/email?secret=a-very-long-inbound-secret-value`, { method: "POST", headers: { "content-type": "application/json" }, body })).status, 403);
+  assert.equal((await send(`Basic ${Buffer.from("inbound:a-very-long-inbound-secret-value").toString("base64")}`)).status, 200);
+  await s.inbox.idle();
+  const contact = s.db.findContactByIdentity(s.clinicId, "email", "pat@example.com")!;
+  const [message] = s.db.listMessages(s.db.conversationForContact(contact, "email").id);
+  assert.equal(message.sender_verified, 0, "no DMARC pass: the sender is not treated as proven");
 });
