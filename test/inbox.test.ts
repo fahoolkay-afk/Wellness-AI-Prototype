@@ -207,3 +207,14 @@ test("texts to numbers outside North America are refused unless enabled", async 
   const message = await s.inbox.deliver(s.clinic(), contact, conv.id, "sms", "hello", { author: "staff", purpose: "reply" });
   assert.equal(message.status, "failed");
 });
+
+test("demo assistant, Jane clinic: the patient gets the clinic's Jane booking link in plain words and nothing is booked here", async () => {
+  const s = setup({ profile: { bookingProvider: "jane", janeBookingUrl: "https://riverside.janeapp.com" } });
+  const result = await s.inbox.receive({ channel: "sms", to: "+14165550100", from: "+19055550177", body: "Can I book a massage next week?", externalId: "SM-jane" });
+  await s.inbox.idle();
+  const reply = s.db.listMessages(result!.conversation.id).at(-1)!;
+  assert.equal(reply.author, "ai");
+  assert.match(reply.body, /https:\/\/riverside\.janeapp\.com/);
+  assert.doesNotMatch(reply.body, /send the patient/i);
+  assert.equal(s.db.contactAppointments(result!.conversation.contact_id).length, 0);
+});

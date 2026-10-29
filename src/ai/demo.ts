@@ -70,6 +70,10 @@ export class DemoResponder implements Responder {
     const serviceId = detectService(lower);
     if (serviceId && /\b(book|appointment|available|availability|opening|slot|come in|schedule|this week|next week|tomorrow|today)\b/.test(lower)) {
       const res = await tool("find_available_times", { service_id: serviceId, ...requestedDay(lower, ctx) });
+      // A clinic that books in Jane: the tool's answer is written for the assistant, so the patient gets the link in plain words.
+      if (ctx.backend.kind === "jane" && p.janeBookingUrl) {
+        return { text: `${hi}You can pick a time that suits you on the clinic's online booking page: ${p.janeBookingUrl} Your booking and intake form are done there. Anything else I can help with?`, handedOff: false, toolsUsed: used };
+      }
       if (res.isError || !res.result.startsWith("[")) return { text: `${hi}${res.result}`, handedOff: false, toolsUsed: used };
       const slots = (JSON.parse(res.result) as Offered["slots"]).slice(0, 3);
       this.offers.set(ctx.conversation.id, { serviceId, slots });
