@@ -102,6 +102,10 @@ test("ElevenLabs voice: caller context, tools and post-call filing", async () =>
   const [call] = s.db.listCalls(s.clinicId);
   assert.equal(call.contact_name, "Maria Gomez");
   assert.equal(call.duration_s, 95);
+  assert.equal(call.direction, "inbound", "who called whom: the patient called the clinic");
+  assert.equal(call.from_number, "+14165550111");
+  assert.equal(call.to_number, "+14165550100");
+  assert.equal(call.handled_by, "assistant");
   assert.match(call.transcript ?? "", /Caller: I need receipts/);
   // Redelivery of the same call is filed once.
   await fetch(`${url}/webhooks/elevenlabs/post-call`, { method: "POST", headers: { "content-type": "application/json", "elevenlabs-signature": sig }, body: payload });

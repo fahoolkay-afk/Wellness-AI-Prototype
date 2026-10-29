@@ -138,7 +138,47 @@ export function seedDemo(db: Db, deps?: { consents: Consents; accounts: Accounts
   db.addMessage({ conversationId: c2.id, channel: "voice", direction: "in", author: "call", body: "📞 Call answered by the virtual assistant (2m 41s)\nSummary: Tom was rear-ended last week and wants physiotherapy under his auto insurance claim. He has a claim number and asked whether the clinic bills the insurer directly. Callback requested.", status: "received" });
   db.updateConversation(c2.id, { needs_attention: 1, attention_reason: "Auto insurance (MVA) claim: staff callback needed" });
   db.createTask({ clinicId, contactId: tom.id, conversationId: c2.id, type: "callback", priority: "urgent", title: "Call back Tom Becker about MVA claim billing", details: "Rear-ended last week; has claim number. Wants to know about direct billing to auto insurer before booking.", createdBy: "ai:voice" });
-  db.upsertCall({ clinic_id: clinicId, contact_id: tom.id, conversation_id: c2.id, external_id: "demo-call-1", from_number: "+16475550188", duration_s: 161, summary: "MVA claim question; callback requested.", transcript: "Agent: Thanks for calling Harbourfront Physio & Wellness. This is the clinic's virtual assistant, and this call is transcribed to help our team. How can I help?\nCaller: Hi, I was in a car accident last week and my insurance says I can get physio...", outcome: "callback_requested" });
+  const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+  db.upsertCall({
+    clinic_id: clinicId, contact_id: tom.id, conversation_id: c2.id, external_id: "demo-call-1", direction: "inbound", handled_by: "assistant",
+    from_number: "+16475550188", to_number: "+14165550100", duration_s: 161, summary: "Auto insurance claim question; callback requested.", outcome: "callback_requested",
+    transcript: [
+      "Assistant: Thanks for calling Harbourfront Physio & Wellness. This is the clinic's virtual assistant, and this call is transcribed to help our team. How can I help?",
+      "Caller: Hi, I was rear-ended last week and my insurance says I can get physio. Do you bill them directly?",
+      "Assistant: I can help you get started. Billing for auto insurance claims is handled by our front desk team. Can I take your name and the best number to call you back?",
+      "Caller: Tom Becker. This number is fine, 647 555 0188.",
+      "Assistant: Thanks, Tom. Do you have your claim number handy? The team will ask for it.",
+      "Caller: Yes, I have it.",
+      "Assistant: Great. I've asked the team to call you back today. Is there a time that works best?",
+      "Caller: After 3 is good.",
+      "Assistant: You're all set. Someone from the front desk will call you after 3 PM today. Anything else I can help with?",
+      "Caller: No, that's it. Thanks.",
+    ].join("\n"),
+  });
+  db.sql.prepare("UPDATE calls SET created_at = ? WHERE external_id = 'demo-call-1'").run(ago(95));
+  // Staff called Tom back from the clinic line.
+  db.upsertCall({
+    clinic_id: clinicId, contact_id: tom.id, conversation_id: c2.id, external_id: "demo-call-2", direction: "outbound", handled_by: "Sam Lee",
+    from_number: "+14165550100", to_number: "+16475550188", duration_s: 252, summary: "Explained direct billing for auto claims; Tom will book after his adjuster confirms.", outcome: "completed",
+    transcript: [
+      "Sam Lee: Hi Tom, it's Sam from Harbourfront Physio & Wellness returning your call. Is now a good time?",
+      "Tom: Yes, thanks for calling back.",
+      "Sam Lee: We can bill your auto insurer directly once we have your claim number and adjuster's details.",
+      "Tom: I'll get the adjuster's email and call you back to book.",
+      "Sam Lee: Perfect. I'll note that here. Talk soon.",
+    ].join("\n"),
+  });
+  db.sql.prepare("UPDATE calls SET created_at = ? WHERE external_id = 'demo-call-2'").run(ago(20));
+  db.addMessage({ conversationId: c2.id, channel: "voice", direction: "out", author: "call", body: "Outgoing call by Sam Lee (4m 12s)\nSummary: Explained direct billing for auto claims; Tom will book after his adjuster confirms.", status: "sent", externalId: "call:demo-call-2" });
+  // A missed call the assistant couldn't take (line busy), so it's on the call log for follow-up.
+  const nadia = db.createContact(clinicId, { name: "Nadia Haddad", phone: "+19055550161", stage: "new_lead", preferred_channel: "sms" });
+  db.upsertCall({
+    clinic_id: clinicId, contact_id: nadia.id, conversation_id: db.conversationForContact(nadia, "voice").id, external_id: "demo-call-3", direction: "inbound", handled_by: null,
+    from_number: "+19055550161", to_number: "+14165550100", duration_s: 0, summary: null, transcript: null, outcome: "missed",
+  });
+  db.sql.prepare("UPDATE calls SET created_at = ? WHERE external_id = 'demo-call-3'").run(ago(8));
+  // Staff followed up Priya on WhatsApp inside the 24-hour window.
+  db.addMessage({ conversationId: c1.id, channel: "whatsapp", direction: "out", author: "staff", authorName: "Sam Lee", body: "Hi Priya, it's Sam at the front desk. Street parking is free on Thursday afternoons, and the entrance is on Queens Quay.", status: "simulated" });
 
   // An Instagram lead.
   const jess = db.createContact(clinicId, { name: "Jess Morales", instagram_id: "ig-1789000", stage: "new_lead", tags: '["massage"]', preferred_channel: "instagram" });

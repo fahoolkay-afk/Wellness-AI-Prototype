@@ -5,7 +5,7 @@ const CHANNEL_LABEL = { sms: "SMS", whatsapp: "WhatsApp", messenger: "Messenger"
 const STAGE_LABEL = { new_lead: "New lead", contacted: "Contacted", booked: "Booked", active_patient: "Active", lapsed: "Lapsed" };
 const STAGE_PILL = { new_lead: "info", contacted: "", booked: "accent", active_patient: "success", lapsed: "warn" };
 const STAGE_HINT = { new_lead: "New people who wrote or called land here", contacted: "Leads you've replied to land here", booked: "Booked a first visit", active_patient: "Seen at least once", lapsed: "No visit in a while" };
-const AVATAR_COLORS = ["#0f766e", "#2563eb", "#b45309", "#7c3aed", "#be123c", "#0e7490", "#4d7c0f", "#a21caf"];
+const AVATAR_COLORS = ["#155eef", "#0e9384", "#b45309", "#7c3aed", "#be123c", "#0e7490", "#4d7c0f", "#a21caf"];
 const CONSENT_CHANNELS = ["sms", "whatsapp", "email", "messenger", "instagram"];
 
 const ICONS = {
@@ -45,6 +45,10 @@ const ICONS = {
   moon: "M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z",
   keyboard: "M2 6h20v12H2zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10",
   info: "M12 22a10 10 0 100-20 10 10 0 000 20zM12 16v-4M12 8h.01",
+  callin: "M16 2v6h6M22 2l-6 6M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 012.1 4.2 2 2 0 014.1 2h3a2 2 0 012 1.7c.1.9.4 1.8.7 2.7a2 2 0 01-.5 2.1L8 9.8a16 16 0 006 6l1.3-1.3a2 2 0 012.1-.4c.9.3 1.8.6 2.7.7a2 2 0 011.7 2z",
+  callout: "M22 8V2h-6M16 8l6-6M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 012.1 4.2 2 2 0 014.1 2h3a2 2 0 012 1.7c.1.9.4 1.8.7 2.7a2 2 0 01-.5 2.1L8 9.8a16 16 0 006 6l1.3-1.3a2 2 0 012.1-.4c.9.3 1.8.6 2.7.7a2 2 0 011.7 2z",
+  callmissed: "M23 1l-6 6M17 1l6 6M22 16.9v3a2 2 0 01-2.2 2 19.8 19.8 0 01-8.6-3.1 19.5 19.5 0 01-6-6A19.8 19.8 0 012.1 4.2 2 2 0 014.1 2h3a2 2 0 012 1.7c.1.9.4 1.8.7 2.7a2 2 0 01-.5 2.1L8 9.8a16 16 0 006 6l1.3-1.3a2 2 0 012.1-.4c.9.3 1.8.6 2.7.7a2 2 0 011.7 2z",
+  transcript: "M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8zM14 2v6h6M8 13h8M8 17h5",
 };
 const CH_ICON = {
   sms: "M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z",
@@ -137,6 +141,16 @@ function duration(ms) {
   const m = Math.max(0, Math.round(ms / 60000));
   return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
 }
+
+/** +14165550123 -> +1 416 555 0123; other handles unchanged. */
+function fmtAddr(a) {
+  if (!a) return "unknown";
+  const d = String(a).replace(/[^\d+]/g, "");
+  const m = /^\+?1?(\d{3})(\d{3})(\d{4})$/.exec(d);
+  return m ? `+1 ${m[1]} ${m[2]} ${m[3]}` : a;
+}
+const fmtDur = (s) => (s ? `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s` : "0s");
+const contactAddress = (c, ch) => ({ sms: c.phone, voice: c.phone, whatsapp: c.whatsapp_id ? `+${String(c.whatsapp_id).replace(/^\+/, "")}` : c.phone, email: c.email, messenger: c.messenger_id, instagram: c.instagram_id }[ch]);
 
 const can = (perm) => state.session?.permissions.includes(perm);
 
@@ -255,19 +269,19 @@ const state = {
 };
 
 const VIEWS = [
-  { id: "inbox", label: "Inbox", perm: "inbox.read" },
-  { id: "dashboard", label: "Today", perm: "stats.read", icon: "dashboard" },
-  { id: "pipeline", label: "Pipeline", perm: "contacts.read" },
-  { id: "contacts", label: "Patients", perm: "contacts.read" },
-  { id: "calendar", label: "Calendar", perm: "calendar.read" },
-  { id: "tasks", label: "Tasks", perm: "tasks.read" },
-  { id: "calls", label: "Calls", perm: "calls.read" },
-  { id: "automations", label: "Funnels", perm: "automations.manage" },
-  { id: "campaigns", label: "Campaigns", perm: "broadcast.send" },
-  { id: "team", label: "Team", perm: "users.manage" },
-  { id: "audit", label: "Audit", perm: "audit.read" },
-  { id: "test", label: "Test", perm: "simulator.use" },
-  { id: "settings", label: "Settings", perm: "settings.manage" },
+  { id: "dashboard", label: "Dashboard", perm: "stats.read", group: "Clinic" },
+  { id: "inbox", label: "Conversations", perm: "inbox.read", group: "Clinic" },
+  { id: "calls", label: "Phone", perm: "calls.read", group: "Clinic" },
+  { id: "calendar", label: "Calendars", perm: "calendar.read", group: "Clinic" },
+  { id: "contacts", label: "Contacts", perm: "contacts.read", group: "Clinic" },
+  { id: "pipeline", label: "Opportunities", perm: "contacts.read", group: "Clinic" },
+  { id: "tasks", label: "Tasks", perm: "tasks.read", group: "Clinic" },
+  { id: "automations", label: "Automation", perm: "automations.manage", group: "Marketing" },
+  { id: "campaigns", label: "Campaigns", perm: "broadcast.send", group: "Marketing" },
+  { id: "team", label: "Team", perm: "users.manage", group: "Admin" },
+  { id: "audit", label: "Audit log", perm: "audit.read", group: "Admin" },
+  { id: "test", label: "Test console", perm: "simulator.use", group: "Admin" },
+  { id: "settings", label: "Settings", perm: "settings.manage", group: "Admin" },
 ];
 const visibleViews = () => VIEWS.filter((v) => can(v.perm) && (v.id !== "test" || state.session.simulator));
 
@@ -405,7 +419,7 @@ async function boot() {
   connectLive();
   const hashView = viewForHash(location.hash.slice(1));
   const views = visibleViews();
-  show(views.some((v) => v.id === hashView) ? hashView : views[0]?.id ?? "dashboard");
+  show(views.some((v) => v.id === hashView) ? hashView : views.some((v) => v.id === "inbox") ? "inbox" : views[0]?.id ?? "dashboard");
 }
 
 async function loadClinic() {
@@ -415,9 +429,12 @@ async function loadClinic() {
 let railEl, titleEl, viewEl, liveDot, aiChip;
 
 function renderShell() {
-  railEl = h("nav", { class: "rail", "aria-label": "Main" }, h("div", { class: "mark", title: "Clinic Front Desk" }, icon("shield", "lg")));
+  railEl = h("nav", { class: "rail", "aria-label": "Main" },
+    h("div", { class: "account" }, h("span", { class: "mark" }, icon("shield")), h("div", {}, h("b", {}, state.clinic.name), h("span", {}, state.clinic.edition === "ehr" ? "Connected to records" : "Standalone clinic"))));
+  let group = "";
   for (const v of visibleViews()) {
-    railEl.append(h("button", { "data-view": v.id, onclick: () => show(v.id) }, icon(v.icon ?? v.id, "lg"), v.label));
+    if (v.group !== group) { group = v.group; railEl.append(h("div", { class: "group" }, group)); }
+    railEl.append(h("button", { "data-view": v.id, onclick: () => show(v.id) }, icon(v.icon ?? v.id, "lg"), h("span", {}, v.label)));
   }
   railEl.append(h("div", { class: "spacer" }));
 
@@ -437,8 +454,10 @@ function renderShell() {
     : h("span", { class: "clinic" }, state.clinic.name);
   const me = state.session.user;
   const meBtn = h("button", { class: "who-chip", "aria-haspopup": "menu", onclick: (e) => userMenu(e.currentTarget) }, avatar(me.name), h("span", { class: "hide-sm" }, firstName(me.name)));
+  const topSearch = can("contacts.read") ? h("form", { class: "topsearch hide-sm", role: "search", onsubmit: (e) => { e.preventDefault(); state.contactQuery = e.target.q.value; show("contacts"); } },
+    icon("search"), h("input", { type: "search", name: "q", placeholder: "Search contacts", "aria-label": "Search contacts" })) : null;
   const topbar = h("header", { class: "topbar" },
-    titleEl, clinicSelect, h("div", { class: "spacer" }),
+    titleEl, clinicSelect, h("div", { class: "spacer" }), topSearch,
     state.boot.demo || window.__FD_DEMO__ ? pill(window.__FD_DEMO__ ? "Browser demo" : "Demo data", "warn", { title: "Sample data only. Never enter real patient information." }) : null,
     h("span", { class: "hide-sm" }, aiChip), liveDot, meBtn);
   viewEl = h("main", { class: "view", id: "view" });
@@ -687,7 +706,7 @@ function viewInbox() {
     fill(head,
       h("button", { class: "btn ghost icon back", "aria-label": "Back to conversations", onclick: () => { layout.classList.remove("open"); state.convId = null; drawList(); } }, icon("back")),
       avatar(name),
-      h("div", { class: "who" }, h("b", {}, name), h("span", { class: "row meta" }, reachable.map(chBadge), [contact.phone, contact.email].filter(Boolean).join(" · "))),
+      h("div", { class: "who" }, h("b", {}, name), h("span", { class: "row meta" }, reachable.map(chBadge), [contact.phone && fmtAddr(contact.phone), contact.email].filter(Boolean).join(" · "))),
       h("span", { class: "hide-sm" }, mode),
       h("button", { class: "btn ghost icon panel-toggle", "aria-label": "Patient details", title: "Patient details (.)", onclick: () => layout.classList.toggle("show-side") }, icon("panel")));
     banner.classList.toggle("hidden", !conversation.needs_attention);
@@ -695,7 +714,10 @@ function viewInbox() {
       can("inbox.manage") && h("button", { class: "btn sm", onclick: async () => { await attempt(() => api("POST", `/conversations/${conversation.id}/resolve`, {}), "Marked handled"); loadThread(); loadList(); } }, icon("check"), "Mark handled"));
   }
 
-  function drawMessages({ messages }) {
+  function drawMessages({ messages: rawMessages, calls = [] }) {
+    // Calls appear from their call records (who called whom, duration, transcript), in time order with messages.
+    const messages = [...rawMessages.filter((m) => !(m.author === "call" && calls.length)), ...calls.map((c) => ({ ...c, __call: true }))]
+      .sort((a, b) => a.created_at.localeCompare(b.created_at));
     const nodes = [];
     let lastDay = "";
     let prev = null;
@@ -707,6 +729,7 @@ function viewInbox() {
         lastDay = day;
         prev = null;
       }
+      if (m.__call) { nodes.push(callCard(m, state.thread.contact)); prev = null; continue; }
       if (m.author === "system") { nodes.push(h("div", { class: "sysrow" }, h("span", {}, m.body))); prev = null; continue; }
       if (m.author === "call") { nodes.push(callRow(m)); prev = null; continue; }
       const next = messages[i + 1];
@@ -717,7 +740,7 @@ function viewInbox() {
       prev = m;
     }
     messagesEl.replaceChildren(...nodes);
-    for (const m of messages) seenIds.add(m.id);
+    for (const m of rawMessages) seenIds.add(m.id);
   }
 
   function callRow(m) {
@@ -732,15 +755,21 @@ function viewInbox() {
     const kind = m.author === "ai" ? "ai" : m.author === "staff" ? "staff" : "";
     const isNew = !seenIds.has(m.id) && seenIds.size > 0 && !out;
     const status = { sent: [icon("check"), "Sent"], simulated: [icon("check"), "Simulated"], failed: [icon("alert"), "Not delivered"], received: null }[m.status];
-    const author = first && out && (m.author === "ai"
-      ? h("div", { class: "author" }, icon("sparkle"), "Assistant")
-      : h("div", { class: "author" }, m.author_name ?? "Staff"));
+    const author = first && (out
+      ? (m.author === "ai" ? h("div", { class: "author" }, icon("sparkle"), "Assistant") : h("div", { class: "author" }, m.author_name ?? "Staff"))
+      : h("div", { class: "author", style: { color: "var(--fg-muted)" } }, state.thread.contact.name ?? "Patient"));
+    const t = state.thread;
+    const theirs = fmtAddr(contactAddress(t.contact, m.channel));
+    const raw = t.clinicAddresses?.[m.channel];
+    const ours = raw && /^\+?\d[\d\s-]{6,}$/.test(raw) ? `clinic ${fmtAddr(raw)}` : `clinic ${CHANNEL_LABEL[m.channel]}${m.channel === "email" && raw ? ` (${raw})` : ""}`;
+    const route = h("div", { class: "route", title: "Who sent it, and to whom" }, out ? `${ours} → ${theirs}` : `${theirs} → ${ours}`);
     return h("div", { class: `msg-row ${out ? "out" : "in"}${first ? " new-group" : ""}` },
       h("div", { class: `msg ${kind}${last ? " tail" : ""}${m.status === "failed" ? " failed" : ""}${isNew ? " arrive" : ""}` },
         author,
         m.subject && h("div", { class: "subject" }, m.subject),
         m.purged_at ? h("span", { class: "subtle" }, "Message text cleared after the retention period") : m.body,
         m.error && h("div", { class: "err" }, m.error),
+        route,
         h("div", { class: "foot" }, chBadge(m.channel), fmtTime(m.created_at), out && status && h("span", { class: "row", style: { gap: "3px", color: m.status === "failed" ? "var(--danger)" : "" } }, status))));
   }
 
@@ -769,6 +798,8 @@ function viewInbox() {
       if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) { e.preventDefault(); send(); }
     } });
     const sendBtn = h("button", { class: "btn primary send", "aria-label": "Send", title: "Send (Enter)", onclick: () => send() }, icon("send", "lg"));
+    channel.classList.add("hidden");
+    const chTabs = h("div", { class: "tabs-ch", role: "group", "aria-label": "Reply on" });
     const row = h("div", { class: "composer-row" }, channel, text, sendBtn);
     const blocked = h("div", { class: "blocked hidden" });
     const foot = h("div", { class: "foot" });
@@ -811,13 +842,15 @@ function viewInbox() {
           : h("span", {}, data.conversation.paused_by ? `Assistant paused by ${data.conversation.paused_by}.` : "Assistant is off here."));
     }
     return {
-      el: h("div", { class: "composer" }, subject, blocked, row, foot),
+      el: h("div", { class: "composer" }, chTabs, subject, blocked, row, foot),
       focus: () => text.focus(),
       update(data) {
         const current = channel.value;
         const options = (data.reachable.length ? data.reachable : [data.conversation.last_channel]).filter((c) => c !== "voice");
         fill(channel, options.map((c) => h("option", { value: c }, CHANNEL_LABEL[c])));
         channel.value = options.includes(current) ? current : options.includes(data.conversation.last_channel) ? data.conversation.last_channel : options[0];
+        const drawTabs = () => fill(chTabs, options.map((c) => h("button", { type: "button", "aria-pressed": String(channel.value === c), onclick: () => { channel.value = c; drawTabs(); draw(); } }, chBadge(c), CHANNEL_LABEL[c])));
+        drawTabs();
         grow();
         draw();
       },
@@ -878,6 +911,46 @@ function viewInbox() {
   });
 }
 
+function callKind(c) {
+  if (c.outcome === "missed" || (!c.duration_s && c.direction === "inbound")) return "missed";
+  return c.direction === "outbound" ? "out" : "in";
+}
+
+function callTitle(c, contactName) {
+  const who = contactName ?? fmtAddr(c.direction === "outbound" ? c.to_number : c.from_number);
+  const kind = callKind(c);
+  if (kind === "missed") return `Missed call from ${who}`;
+  return c.direction === "outbound" ? `Outgoing call to ${who}` : `Incoming call from ${who}`;
+}
+
+function transcriptView(text) {
+  if (!text) return h("p", { class: "meta" }, "No transcript for this call.");
+  return h("div", { class: "transcript" }, text.split("\n").filter(Boolean).map((line) => {
+    const i = line.indexOf(": ");
+    const who = i > 0 && i < 40 ? line.slice(0, i) : "";
+    const said = who ? line.slice(i + 2) : line;
+    const cls = /assistant|receptionist|agent/i.test(who) ? "assistant" : /caller|patient/i.test(who) ? "caller" : "";
+    return h("div", { class: `turn ${cls}` }, h("span", { class: "who" }, who || "…"), h("span", {}, said));
+  }));
+}
+
+function callCard(c, contact) {
+  const kind = callKind(c);
+  const open = h("div", { class: "hidden" }, transcriptView(c.transcript));
+  const toggle = c.transcript ? h("button", { class: "btn sm", onclick: (e) => { open.classList.toggle("hidden"); e.currentTarget.textContent = open.classList.contains("hidden") ? "Show transcript" : "Hide transcript"; } }, "Show transcript") : null;
+  return h("div", { class: "call-card" },
+    h("div", { class: "head" },
+      h("span", { class: `dir ${kind}`, "aria-hidden": "true" }, icon(kind === "missed" ? "callmissed" : kind === "out" ? "callout" : "callin")),
+      h("b", {}, callTitle(c, contact?.name ?? c.contact_name)), h("span", { class: "meta" }, fmtDateTime(c.created_at)),
+      h("span", { style: { marginLeft: "auto" } }, toggle)),
+    h("div", { class: "facts" },
+      h("span", {}, "From ", h("b", {}, fmtAddr(c.from_number))), h("span", {}, "To ", h("b", {}, fmtAddr(c.to_number))),
+      h("span", {}, "Duration ", h("b", {}, fmtDur(c.duration_s))),
+      h("span", {}, "Handled by ", h("b", {}, kind === "missed" ? "nobody" : c.handled_by === "assistant" ? "the phone assistant" : c.handled_by ?? "staff"))),
+    c.summary ? h("div", {}, c.summary) : c.purged_at ? h("span", { class: "meta" }, "Summary and transcript cleared after the retention period") : null,
+    open);
+}
+
 function emptyState(iconName, title, text, action) {
   return h("div", { class: "empty" }, icon(iconName, "xl"), h("b", {}, title), text && h("p", {}, text), action);
 }
@@ -924,7 +997,7 @@ function consentSection(contact, consents, onChange) {
     h("h4", {}, "Consent", can("consent.write") && h("button", { class: "btn ghost sm", onclick: () => recordConsent(contact, onChange) }, icon("plus"), "Record")),
     h("div", { class: "consent-grid" },
       h("span", {}), h("span", { class: "h" }, "Reminders"), h("span", { class: "h" }, "Marketing"),
-      shown.map((ch) => [h("span", { class: "row", style: { gap: "6px" } }, chBadge(ch), CHANNEL_LABEL[ch]),
+      shown.map((ch) => [h("span", { class: "row", style: { gap: "6px", flexWrap: "nowrap", whiteSpace: "nowrap" } }, chBadge(ch), CHANNEL_LABEL[ch]),
         pill(...[label[consents[ch].service][0], label[consents[ch].service][1]]),
         pill(...[label[consents[ch].marketing][0], label[consents[ch].marketing][1]])])),
     h("p", { class: "meta" }, "Replies to someone who wrote first are always allowed. Reminders need a yes on that channel; marketing needs an express yes."));
@@ -1182,7 +1255,8 @@ async function viewPipeline() {
 
 async function viewContacts() {
   const page = h("div", { class: "page" });
-  const search = h("input", { type: "search", placeholder: "Search patients", "aria-label": "Search patients", oninput: () => draw() });
+  const search = h("input", { type: "search", placeholder: "Search contacts", "aria-label": "Search contacts", value: state.contactQuery ?? "", oninput: () => draw() });
+  state.contactQuery = "";
   const tbody = h("tbody");
   page.append(
     h("div", { class: "row between" }, h("div", { class: "search grow", style: { maxWidth: "360px" } }, icon("search"), search),
@@ -1297,21 +1371,52 @@ async function viewTasks() {
 // ------------------------------------------------------------------ calls
 
 async function viewCalls() {
-  const page = h("div", { class: "page narrow" });
+  let filter = "all";
+  const page = h("div", { class: "page" });
+  const tabs = h("div", { class: "tabs", role: "tablist" }, [["all", "All calls"], ["in", "Incoming"], ["out", "Outgoing"], ["missed", "Missed"]].map(([f, label]) => h("button", {
+    role: "tab", "aria-selected": String(f === filter), onclick: (e) => { filter = f; for (const x of tabs.children) x.setAttribute("aria-selected", String(x === e.currentTarget)); draw(); },
+  }, label)));
+  const tbody = h("tbody");
+  page.append(
+    h("div", { class: "banner info" }, icon("info"), "Every call to or from the clinic line: who called whom, who answered, how long it lasted, and the transcript. The phone assistant tells callers the call is transcribed."),
+    tabs,
+    h("section", { class: "card table-wrap call-log" }, h("table", { class: "t" },
+      h("thead", {}, h("tr", {}, ["", "Contact", "From", "To", "Handled by", "Duration", "When", ""].map((x) => h("th", {}, x)))), tbody)));
   viewEl.replaceChildren(page);
+  let calls = [];
   async function draw(background = false) {
-    const calls = await attempt(() => api("GET", `/clinics/${state.clinicId}/calls`, undefined, { background })) ?? [];
-    fill(page,
-      h("div", { class: "banner info" }, icon("info"), "The phone assistant answers, tells callers the call is transcribed, and checks identity with a one-time code before discussing an existing appointment."),
-      calls.length ? calls.map((c) => h("section", { class: "card" },
-        h("header", {}, h("div", { class: "row" }, chBadge("voice"), h("div", {}, h("h3", {}, c.contact_name ?? c.from_number ?? "Unknown caller"), h("div", { class: "meta" }, [fmtDateTime(c.created_at), c.duration_s ? `${Math.floor(c.duration_s / 60)}m ${c.duration_s % 60}s` : null, c.outcome].filter(Boolean).join(" · ")))),
-          c.contact_id && can("inbox.read") && h("button", { class: "btn sm", onclick: () => openContactThread(c.contact_id) }, "Open conversation")),
-        h("div", { class: "body stack" }, h("p", {}, c.summary ?? h("span", { class: "subtle" }, "No summary (cleared after the retention period, or not available).")),
-          c.transcript && h("details", {}, h("summary", { class: "small", style: { cursor: "pointer" } }, "Transcript"), h("pre", { class: "small", style: { whiteSpace: "pre-wrap", margin: "8px 0 0" } }, c.transcript)))))
-        : emptyState("calls", "No calls yet", "Calls answered by the phone assistant appear here with a summary."));
+    calls = await attempt(() => api("GET", `/clinics/${state.clinicId}/calls`, undefined, { background })) ?? calls;
+    const shown = calls.filter((c) => filter === "all" || callKind(c) === filter);
+    if (!shown.length) { fill(tbody, h("tr", {}, h("td", { colspan: "8" }, emptyState("calls", "No calls here", "Calls answered by the phone assistant or made by staff appear here.")))); return; }
+    fill(tbody, shown.map((c) => {
+      const kind = callKind(c);
+      return h("tr", {},
+        h("td", {}, h("span", { class: `pill ${kind === "missed" ? "danger" : kind === "out" ? "success" : "accent"}` }, icon(kind === "missed" ? "callmissed" : kind === "out" ? "callout" : "callin"), kind === "missed" ? "Missed" : kind === "out" ? "Outgoing" : "Incoming")),
+        h("td", {}, h("b", {}, c.contact_name ?? "Unknown caller")),
+        h("td", { class: "route" }, fmtAddr(c.from_number)), h("td", { class: "route" }, fmtAddr(c.to_number)),
+        h("td", {}, kind === "missed" ? "—" : c.handled_by === "assistant" ? h("span", { class: "row", style: { gap: "4px", color: "var(--ai)" } }, icon("sparkle"), "Phone assistant") : c.handled_by ?? "Staff"),
+        h("td", {}, fmtDur(c.duration_s)),
+        h("td", { class: "meta" }, fmtDateTime(c.created_at)),
+        h("td", {}, h("div", { class: "row end" },
+          c.transcript ? h("button", { class: "btn sm", onclick: () => callDrawer(c) }, icon("transcript"), "Transcript") : null,
+          c.contact_id && can("inbox.read") ? h("button", { class: "btn sm ghost", onclick: () => openContactThread(c.contact_id) }, "Conversation") : null)));
+    }));
   }
   refreshers.calls = () => draw(true);
   draw();
+}
+
+function callDrawer(c) {
+  const close = () => { scrim.remove(); document.removeEventListener("keydown", onKey, true); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const drawer = h("aside", { class: "drawer", role: "dialog", "aria-modal": "true", "aria-label": "Call transcript" },
+    h("header", {}, h("h3", {}, callTitle(c, c.contact_name)), h("button", { class: "btn ghost icon", "aria-label": "Close", onclick: close }, icon("x"))),
+    h("div", { class: "body" }, callCard({ ...c, transcript: null }, { name: c.contact_name }), h("b", { class: "small" }, "Transcript"), transcriptView(c.transcript),
+      h("p", { class: "meta" }, "Transcripts are encrypted at rest and cleared after the clinic's retention period. They never go to the records system or the exercise brain.")));
+  const scrim = h("div", { class: "scrim", style: { placeItems: "stretch" }, onmousedown: (e) => { if (e.target === scrim) close(); } }, drawer);
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(scrim);
+  drawer.querySelector("button")?.focus();
 }
 
 // ---------------------------------------------------------------- funnels

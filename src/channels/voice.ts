@@ -129,7 +129,8 @@ export class Voice {
     const duration = data.metadata?.call_duration_secs ?? null;
     this.db.upsertCall({
       clinic_id: clinic.id, contact_id: contact?.id ?? null, conversation_id: conversation?.id ?? null,
-      external_id: data.conversation_id ?? null, from_number: phone ?? null, duration_s: duration, summary, transcript,
+      external_id: data.conversation_id ?? null, from_number: phone ?? null, to_number: called ?? null, direction: "inbound", handled_by: "assistant",
+      duration_s: duration, summary, transcript,
       outcome: data.analysis?.call_successful ?? data.status ?? null, notice_version: CALL_NOTICE_VERSION,
     });
     this.audit.record({ actorType: "webhook", actor: "elevenlabs", clinicId: clinic.id, action: "call.record", target: `call:${data.conversation_id ?? "?"}`, contactId: contact?.id ?? null, outcome: "ok", detail: `${duration ?? 0}s` });

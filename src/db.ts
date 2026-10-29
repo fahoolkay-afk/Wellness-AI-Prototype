@@ -204,6 +204,11 @@ export class Db {
     add("messages", "purged_at", "TEXT");
     add("calls", "notice_version", "TEXT");
     add("calls", "purged_at", "TEXT");
+    // Who called whom: inbound (patient -> clinic) or outbound (clinic -> patient), the number dialled,
+    // and who handled it ("assistant" or the staff member's name).
+    add("calls", "direction", "TEXT NOT NULL DEFAULT 'inbound'");
+    add("calls", "to_number", "TEXT");
+    add("calls", "handled_by", "TEXT");
     add("conversations", "paused_by", "TEXT");
     add("appointments", "confirmed_at", "TEXT");
   }
@@ -677,16 +682,16 @@ export class Db {
 
   // ---- calls ---------------------------------------------------------------
 
-  upsertCall(c: Omit<Call, "id" | "created_at"> & { notice_version?: string | null }): Call {
+  upsertCall(c: Omit<Call, "id" | "created_at" | "direction" | "to_number" | "handled_by"> & Partial<Pick<Call, "direction" | "to_number" | "handled_by">> & { notice_version?: string | null }): Call {
     const aad = `call:${c.clinic_id}`;
     this.run(
-      `INSERT INTO calls (clinic_id, contact_id, conversation_id, external_id, from_number, duration_s, summary, transcript, outcome, notice_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO calls (clinic_id, contact_id, conversation_id, external_id, from_number, duration_s, summary, transcript, outcome, notice_version, direction, to_number, handled_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(external_id) DO UPDATE SET duration_s = excluded.duration_s, summary = excluded.summary,
          transcript = excluded.transcript, outcome = excluded.outcome`,
       c.clinic_id, c.contact_id, c.conversation_id, c.external_id, c.from_number, c.duration_s,
       this.vault.seal(c.clinic_id, `${aad}:summary`, c.summary), this.vault.seal(c.clinic_id, `${aad}:transcript`, c.transcript),
-      c.outcome, c.notice_version ?? null,
+      c.outcome, c.notice_version ?? null, c.direction ?? "inbound", c.to_number ?? null, c.handled_by ?? "assistant",
     );
     return this.decCall(this.one<Call>("SELECT * FROM calls WHERE external_id = ?", c.external_id)!);
   }

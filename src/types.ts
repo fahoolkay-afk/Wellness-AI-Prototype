@@ -206,6 +206,12 @@ export interface Call {
   summary: string | null;
   transcript: string | null;
   outcome: string | null;
+  /** inbound: patient called the clinic. outbound: the clinic called the patient. */
+  direction: "inbound" | "outbound";
+  /** The number that was dialled (the clinic's line for inbound calls, the patient's for outbound). */
+  to_number: string | null;
+  /** "assistant" for the voice agent, otherwise the staff member's name. */
+  handled_by: string | null;
   created_at: string;
 }
 

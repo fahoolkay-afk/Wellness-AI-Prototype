@@ -439,6 +439,9 @@ export function createApp(s: Services): express.Express {
       tasks: db.listTasks(conversation.clinic_id, "all", contact.id),
       consents: consents.summary(contact.id),
       proposals: db.listProposals(contact.id),
+      // Who contacted whom: the clinic's own number/handle on each channel, and this person's calls.
+      clinicAddresses: Object.fromEntries(CHANNELS.map((ch) => [ch, db.channelAddress(conversation.clinic_id, ch) ?? null])),
+      calls: can(sess(res).user.role, "calls.read") ? db.callsForContact(contact.id) : [],
       windows: Object.fromEntries((["whatsapp", "messenger", "instagram"] as Channel[]).map((ch) => {
         const last = db.lastInboundAt(conversation.id, ch);
         return [ch, last ? new Date(Date.parse(last) + 24 * 3600_000).toISOString() : null];
