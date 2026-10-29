@@ -88,9 +88,11 @@ export { Router };
 export function dispatch(app, { method, url, headers = {}, body, onWrite, onClose }) {
   const u = new URL(url, "http://demo.local");
   const closeHandlers = [];
+  // Same-origin, like the page itself, so the app's cross-site request check passes.
+  headers = { host: "demo.local", origin: "http://demo.local", ...headers };
   const req = {
     method, url: u.pathname + u.search, originalUrl: u.pathname + u.search, path: u.pathname,
-    query: Object.fromEntries(u.searchParams), headers, body, params: {}, secure: true,
+    query: Object.fromEntries(u.searchParams), headers, body, params: {}, secure: true, ip: "browser-demo",
     get: (name) => headers[name.toLowerCase()],
     on: (event, fn) => { if (event === "close") closeHandlers.push(fn); },
   };

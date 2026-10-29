@@ -32,12 +32,14 @@ const result = await build({
     "node:events": "events",
     "@anthropic-ai/sdk": shim("node-misc.js"),
   },
+  charset: "utf8",
   logLevel: "warning",
 });
 
 const js = result.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
 const css = readFileSync(here("../public/styles.css"), "utf8");
-const html = `<title>Clinic Front Desk</title>
+const html = `<meta charset="utf-8">
+<title>Clinic Front Desk</title>
 <meta name="description" content="Unified patient inbox and AI receptionist for clinics (browser demo)">
 <style>
 ${css}

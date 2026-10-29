@@ -37,8 +37,8 @@ const LOOKALIKES: Record<string, string> = {
 function normalise(text: string): string {
   return text
     .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "") // combining marks
-    .replace(/[​-‏‪-‮⁠-⁤﻿­]/g, "") // zero-width, bidi, soft hyphen
+    .replace(/[\u0300-\u036f]/g, "") // combining marks
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff\u00ad]/g, "") // zero-width, bidi, soft hyphen
     .replace(/./g, (ch) => LOOKALIKES[ch] ?? ch)
     .normalize("NFKC")
     .replace(/https?:\/\/\S+/g, " ") // links can't trip the guard

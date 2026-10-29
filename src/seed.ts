@@ -147,7 +147,7 @@ export function seedDemo(db: Db, deps?: { consents: Consents; accounts: Accounts
   db.addMessage({ conversationId: c3.id, channel: "instagram", direction: "out", author: "ai", body: "Hi Jess! A 90-minute registered massage therapy session is $175, and yes, we direct-bill Blue Cross. Sofia has availability Tuesday and Thursday evenings. Want me to check times for you?", status: "simulated" });
 
   // An email in the general inbox with an AI draft waiting for approval.
-  const rob = db.createContact(clinicId, { name: "Robert Lin", email: "robert.lin@example.com", stage: "active_patient", preferred_channel: "email" });
+  const rob = db.createContact(clinicId, { name: "Robert Lin", email: "robert.lin@example.com", stage: "active_patient", preferred_channel: "email", tags: '["newsletter"]' });
   const c4 = db.conversationForContact(rob, "email");
   db.addMessage({ conversationId: c4.id, channel: "email", direction: "in", author: "patient", subject: "Receipt for my insurance", body: "Hello, could you please send me receipts for my last three chiropractic visits? My insurer needs them for reimbursement. Thanks, Robert", status: "received" });
   db.addMessage({ conversationId: c4.id, channel: "email", direction: "out", author: "ai", subject: "Re: Receipt for my insurance", body: "Hi Robert,\n\nThanks for reaching out. I've passed your request for receipts for your last three chiropractic visits to our billing team, and they'll email them to you within one business day.\n\nBest regards,\nHarbourfront Physio & Wellness", status: "draft" });

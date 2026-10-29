@@ -1,6 +1,13 @@
-// The parts of node:crypto the app uses, for the browser demo: HMAC-SHA256
-// (session cookies) and timingSafeEqual. Signature checks for real provider
-// webhooks never run in the demo, so the key/sign helpers just throw.
+// The parts of node:crypto the app uses, for the browser demo only.
+//
+// DEMO STAND-INS, NOT REAL SECURITY. The browser demo holds made-up sample data in memory and
+// sends nothing anywhere, so the server's crypto is replaced with small pure-JS equivalents:
+//   - SHA-256, HMAC-SHA256 and HKDF are real.
+//   - "aes-256-gcm" is a stand-in stream cipher (HMAC-SHA256 counter keystream + HMAC tag) with the
+//     same interface, so the app's encrypt/decrypt code paths run unchanged.
+//   - scrypt is a stand-in (iterated HMAC), fast enough for a page load.
+// The real server uses node:crypto (AES-256-GCM, scrypt). Never reuse this file outside the demo.
+// Signature checks for real provider webhooks never run in the demo, so the key/sign helpers throw.
 
 import { Buffer } from "buffer/";
 
@@ -78,10 +85,96 @@ export function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
+const concat = (parts) => {
+  const out = new Uint8Array(parts.reduce((n, c) => n + c.length, 0));
+  let o = 0;
+  for (const c of parts) { out.set(c, o); o += c.length; }
+  return out;
+};
+const hmacBytes = (key, ...data) => { const m = createHmac("sha256", key); for (const d of data) m.update(d); return new Uint8Array(m.digest()); };
+
+export function createHash() {
+  const chunks = [];
+  return {
+    update(data) { chunks.push(bytes(data)); return this; },
+    digest(encoding) { const r = Buffer.from(sha256(concat(chunks))); return encoding ? r.toString(encoding) : r; },
+  };
+}
+
+export function randomBytes(n) {
+  const out = new Uint8Array(n);
+  crypto.getRandomValues(out);
+  return Buffer.from(out);
+}
+
+export function randomInt(min, max) {
+  if (max === undefined) { max = min; min = 0; }
+  const span = max - min;
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  return min + (buf[0] % span);
+}
+
+export function hkdfSync(_alg, ikm, salt, info, length) {
+  const prk = hmacBytes(bytes(salt).length ? bytes(salt) : new Uint8Array(32), bytes(ikm));
+  const blocks = [];
+  let prev = new Uint8Array(0);
+  for (let i = 1; blocks.reduce((n, b) => n + b.length, 0) < length; i++) {
+    prev = hmacBytes(prk, prev, bytes(info), new Uint8Array([i]));
+    blocks.push(prev);
+  }
+  return concat(blocks).slice(0, length).buffer;
+}
+
+export function scryptSync(password, salt, keylen) {
+  let out = hmacBytes(bytes(salt), bytes(password));
+  for (let i = 0; i < 200; i++) out = hmacBytes(out, bytes(password));
+  return Buffer.from(out.slice(0, keylen));
+}
+
+function streamCipher(key, iv, decrypt) {
+  const k = bytes(key);
+  const nonce = bytes(iv);
+  const encKey = hmacBytes(k, "enc");
+  const macKey = hmacBytes(k, "mac");
+  let aad = new Uint8Array(0);
+  let tag;
+  const body = [];
+  const keystream = (len) => {
+    const blocks = [];
+    for (let i = 0; blocks.length * 32 < len; i++) blocks.push(hmacBytes(encKey, nonce, new Uint8Array([i >> 24, i >> 16, i >> 8, i])));
+    return concat(blocks);
+  };
+  const run = () => {
+    const input = concat(body);
+    const ks = keystream(input.length);
+    return input.map((b, i) => b ^ ks[i]);
+  };
+  return {
+    setAAD(a) { aad = bytes(a); return this; },
+    setAuthTag(t) { tag = bytes(t); return this; },
+    getAuthTag() { return Buffer.from(tag); },
+    update(data, enc) { body.push(typeof data === "string" ? new TextEncoder().encode(data) : bytes(data)); return Buffer.alloc(0); },
+    final() {
+      const out = run();
+      const ct = decrypt ? concat(body) : out;
+      const expected = hmacBytes(macKey, nonce, aad, ct).slice(0, 16);
+      if (decrypt) {
+        if (!tag || !timingSafeEqual(expected, tag)) throw new Error("Unsupported state or unable to authenticate data");
+      } else {
+        tag = expected;
+      }
+      return Buffer.from(out);
+    },
+  };
+}
+export const createCipheriv = (_alg, key, iv) => streamCipher(key, iv, false);
+export const createDecipheriv = (_alg, key, iv) => streamCipher(key, iv, true);
+
 const unavailable = () => { throw new Error("Not available in the browser demo"); };
 export const createPublicKey = unavailable;
 export const verify = unavailable;
 export const sign = unavailable;
 export const generateKeyPairSync = unavailable;
 
-export default { createHmac, timingSafeEqual, createPublicKey, verify, sign, generateKeyPairSync };
+export default { createHmac, createHash, timingSafeEqual, randomBytes, randomInt, hkdfSync, scryptSync, createCipheriv, createDecipheriv, createPublicKey, verify, sign, generateKeyPairSync };

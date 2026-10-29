@@ -427,12 +427,13 @@ export class Db {
     return this.getConversation(id)!;
   }
 
-  listConversations(clinicId: number, filter: "all" | "attention" | "unread" = "all"): (Conversation & { contact_name: string | null; contact_phone: string | null; contact_email: string | null; stage: Stage; preview: string | null; preview_author: MessageAuthor | null })[] {
+  listConversations(clinicId: number, filter: "all" | "attention" | "unread" = "all"): (Conversation & { contact_name: string | null; contact_phone: string | null; contact_email: string | null; stage: Stage; preview: string | null; preview_author: MessageAuthor | null; drafts: number })[] {
     const extra = filter === "attention" ? "AND c.needs_attention = 1" : filter === "unread" ? "AND c.unread > 0" : "";
-    const rows = this.all<Conversation & { contact_name: string | null; contact_phone: string | null; contact_email: string | null; stage: Stage; preview: string | null; preview_author: MessageAuthor | null }>(
+    const rows = this.all<Conversation & { contact_name: string | null; contact_phone: string | null; contact_email: string | null; stage: Stage; preview: string | null; preview_author: MessageAuthor | null; drafts: number }>(
       `SELECT c.*, ct.name AS contact_name, ct.phone AS contact_phone, ct.email AS contact_email, ct.stage AS stage,
               (SELECT body FROM messages m WHERE m.conversation_id = c.id AND m.status != 'draft' ORDER BY m.id DESC LIMIT 1) AS preview,
-              (SELECT author FROM messages m WHERE m.conversation_id = c.id AND m.status != 'draft' ORDER BY m.id DESC LIMIT 1) AS preview_author
+              (SELECT author FROM messages m WHERE m.conversation_id = c.id AND m.status != 'draft' ORDER BY m.id DESC LIMIT 1) AS preview_author,
+              (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.status = 'draft') AS drafts
        FROM conversations c JOIN contacts ct ON ct.id = c.contact_id
        WHERE c.clinic_id = ? ${extra}
        ORDER BY c.needs_attention DESC, c.last_message_at DESC LIMIT 200`,

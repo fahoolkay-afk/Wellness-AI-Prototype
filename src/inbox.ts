@@ -132,7 +132,7 @@ export class Inbox {
       const current = this.db.getConversation(conversation.id)!;
       if (!current.ai_enabled) {
         // A person has taken over this thread: make sure the new message isn't missed.
-        this.db.updateConversation(conversation.id, { needs_attention: 1, attention_reason: "New message from the patient (AI is paused here)" });
+        this.db.updateConversation(conversation.id, { needs_attention: 1, attention_reason: "New message from the patient (assistant is paused here)" });
       } else if ((inbound.channel === "sms" || inbound.channel === "voice") && !this.config.security.allowInternational && !isNanp(contact.phone ?? inbound.from)) {
         this.db.updateConversation(conversation.id, { needs_attention: 1, attention_reason: "Message from a number outside North America: reply manually" });
       } else {
@@ -244,7 +244,7 @@ export class Inbox {
     const hourAgo = new Date(Date.now() - 3600_000).toISOString();
     const dayAgo = new Date(Date.now() - 24 * 3600_000).toISOString();
     if (this.db.aiTurnsSince(clinic.id, hourAgo, contact.id) >= this.config.anthropic.hourlyTurnsPerContact) {
-      return flag("Unusually many messages from this person: AI paused for an hour, please review");
+      return flag("Unusually many messages from this person: assistant paused for an hour, please review");
     }
     if (this.db.aiTurnsSince(clinic.id, dayAgo) >= this.config.anthropic.dailyTurnsPerClinic) {
       const key = `${clinic.id}:${dayAgo.slice(0, 10)}`;
@@ -279,7 +279,7 @@ export class Inbox {
     const wording = wordingProblems(reply.text, enabledWordingRules(clinic));
     if (mode === "draft" || wording.length) {
       this.db.addMessage({ conversationId, channel, direction: "out", author: "ai", body: reply.text, subject, status: "draft", purpose: "reply" });
-      flag(wording.length ? `AI reply held for review: it used ${wording.join(", ")}` : conversation.attention_reason ?? "AI draft waiting for approval");
+      flag(wording.length ? `AI reply held for review: it used ${wording.join(", ")}` : conversation.attention_reason ?? "Assistant draft waiting for approval");
       return;
     }
     await this.deliver(clinic, this.db.getContact(contact.id)!, conversationId, channel, reply.text, { author: "ai", subject, purpose: "reply" });

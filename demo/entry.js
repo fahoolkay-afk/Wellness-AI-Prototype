@@ -14,7 +14,7 @@ import "../public/app.js";
 (async () => {
   setSqlEngine(await initSqlJs());
   const services = createServices(config, { replyDelayMs: 900 });
-  seedDemo(services.db);
+  seedDemo(services.db, { consents: services.consents, accounts: services.accounts });
   setApp(createApp(services));
   // Automations normally tick every minute on the server.
   const tick = () => services.automations.tick().catch((err) => console.error("[automations]", err));
