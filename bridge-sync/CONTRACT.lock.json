@@ -1,0 +1,10 @@
+{
+  "contractVersion": "1.2",
+  "contractFile": "INTEGRATION-CONTRACT.md",
+  "contractSha256": "dc5366028ca21cf25d6e84bf7d26a90757108bf7656b6de00700d4a3a38bea3d",
+  "eventTypes": ["booking.requested", "appointment.confirmed", "appointment.change_requested", "consent.withdrawn", "delivery.status", "form.submitted"],
+  "capabilities": ["appointments.push_facts", "outreach.push_released", "outreach.write_status", "bridge.pull_inbox", "booking_request.insert", "visit.confirm_by_patient", "consent.withdraw_relay", "forms.key", "forms.invite", "forms.receive"],
+  "routes": ["GET /bridge/v1/inbox", "POST /bridge/v1/inbox/ack", "POST /bridge/v1/appointments", "POST /bridge/v1/outbox", "PUT /bridge/v1/form-key", "POST /bridge/v1/forms", "POST /bridge/v1/forms/revoke"],
+  "formCrypto": { "curve": "ECDH P-256", "kdf": "HKDF-SHA-256", "hkdfSalt": "formRef", "hkdfInfo": "frontdesk-form-v1", "cipher": "AES-256-GCM", "aad": "formRef|keyId" },
+  "consentVersions": { "websiteText": "web-text-v1" }
+}
